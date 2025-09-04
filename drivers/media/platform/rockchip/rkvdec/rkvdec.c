@@ -151,7 +151,6 @@ static int rkvdec_s_ctrl(struct v4l2_ctrl *ctrl)
 	struct rkvdec_ctx *ctx = container_of(ctrl->handler, struct rkvdec_ctx, ctrl_hdl);
 	const struct rkvdec_coded_fmt_desc *desc = ctx->coded_fmt_desc;
 	enum rkvdec_image_fmt image_fmt;
-	struct vb2_queue *vq;
 
 	if (ctrl->id == V4L2_CID_STATELESS_HEVC_EXT_SPS_ST_RPS) {
 		ctx->has_sps_st_rps |= !!(ctrl->has_changed);
@@ -169,11 +168,6 @@ static int rkvdec_s_ctrl(struct v4l2_ctrl *ctrl)
 
 	image_fmt = desc->ops->get_image_fmt(ctx, ctrl);
 	if (rkvdec_image_fmt_changed(ctx, image_fmt)) {
-		vq = v4l2_m2m_get_vq(ctx->fh.m2m_ctx,
-				     V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-		if (vb2_is_busy(vq))
-			return -EBUSY;
-
 		ctx->image_fmt = image_fmt;
 		rkvdec_reset_decoded_fmt(ctx);
 	}
