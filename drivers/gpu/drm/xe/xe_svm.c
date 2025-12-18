@@ -104,8 +104,7 @@ xe_svm_garbage_collector_add_range(struct xe_vm *vm, struct xe_svm_range *range,
 			      &vm->svm.garbage_collector.range_list);
 	spin_unlock(&vm->svm.garbage_collector.lock);
 
-	queue_work(xe_device_get_root_tile(xe)->primary_gt->usm.pf_wq,
-		   &vm->svm.garbage_collector.work);
+	queue_work(xe->usm.pf_wq, &vm->svm.garbage_collector.work);
 }
 
 static void xe_svm_tlb_inval_count_stats_incr(struct xe_gt *gt)
@@ -301,6 +300,11 @@ static int xe_svm_range_set_default_attr(struct xe_vm *vm, u64 range_start, u64 
 	vma = xe_vm_find_vma_by_addr(vm, range_start);
 	if (!vma)
 		return -EINVAL;
+
+	if (!(vma->gpuva.flags & XE_VMA_MADV_AUTORESET)) {
+		drm_dbg(&vm->xe->drm, "Skipping madvise reset for vma.\n");
+		return 0;
+	}
 
 	if (xe_vma_has_default_mem_attrs(vma))
 		return 0;
@@ -628,7 +632,7 @@ err_out:
 
 	/*
 	 * XXX: We can't derive the GT here (or anywhere in this functions, but
-	 * compute always uses the primary GT so accumlate stats on the likely
+	 * compute always uses the primary GT so accumulate stats on the likely
 	 * GT of the fault.
 	 */
 	if (gt)
