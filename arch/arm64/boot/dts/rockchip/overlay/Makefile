@@ -97,7 +97,8 @@ dtbo-$(CONFIG_ARCH_ROCKCHIP) += \
 	rockchip-rk3588-rkvenc-overlay.dtbo \
 	rockchip-rk3588-nanopi-m6-spi-nor-flash.dtbo \
 	rockchip-rk3588-nanopi-m6-display-dsi1-yx35.dtbo \
-	rockchip-rk3588-nanopc-t6-mmc-frequency.dtbo
+	rockchip-rk3588-nanopc-t6-mmc-frequency.dtbo \
+	rockchip-rk3588-gpu-opp-voltage-fix.dtbo
 
 scr-$(CONFIG_ARCH_ROCKCHIP) += \
        rockchip-fixup.scr
