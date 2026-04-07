@@ -31,7 +31,13 @@
 
 #define RKVDEC_VP9_PROBE_SIZE		4864
 #define RKVDEC_VP9_COUNT_SIZE		13208
-#define RKVDEC_VP9_MAX_SEGMAP_SIZE	73728
+/*
+ * VP9 segmap size: ceil(width/64) * ceil(height/64) * 256 / 4
+ * For 4K (3840x2160): 60 * 34 * 64 = 130,560 bytes
+ * For 8K (7680x4320): 120 * 68 * 64 = 522,240 bytes
+ * Use 8K-safe value to cover all supported resolutions.
+ */
+#define RKVDEC_VP9_MAX_SEGMAP_SIZE	524288
 
 struct rkvdec_vp9_intra_mode_probs {
     u8 y_mode[105];
@@ -706,7 +712,7 @@ static void config_registers(struct rkvdec_ctx *ctx,
                 break;
             case 2:
                 regs->vp9_param.reg92.vp9_aref_hor_scale = hscale;
-                regs->vp9_param.reg93.vp9_aref_ver_scale = hscale;
+                regs->vp9_param.reg93.vp9_aref_ver_scale = vscale;
                 break;
         }
 
