@@ -27,7 +27,7 @@
 
 #define RKVDEC_VP9_PROBE_SIZE 4864
 #define RKVDEC_VP9_COUNT_SIZE 13208
-#define RKVDEC_VP9_MAX_SEGMAP_SIZE 73728
+#define RKVDEC_VP9_MAX_SEGMAP_SIZE 524288
 
 struct rkvdec_vp9_intra_mode_probs {
 	u8 y_mode[105];
@@ -659,7 +659,7 @@ static void config_registers(struct rkvdec_ctx *ctx,
 			break;
 		case 2:
 			regs->vp9_param.reg92.vp9_aref_hor_scale = hscale;
-			regs->vp9_param.reg93.vp9_aref_ver_scale = hscale;
+			regs->vp9_param.reg93.vp9_aref_ver_scale = vscale;
 			break;
 		}
 	}
