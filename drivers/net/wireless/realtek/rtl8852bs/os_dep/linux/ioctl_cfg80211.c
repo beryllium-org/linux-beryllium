@@ -10957,13 +10957,13 @@ struct cfg80211_ops rtw_cfg80211_ops = {
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
 	.abort_scan = cfg80211_rtw_abort_scan,
 #endif /* LINUX_VERSION_CODE 4.5.0 */
-	.set_wiphy_params = cfg80211_rtw_set_wiphy_params,
+	.set_wiphy_params = (int (*)(struct wiphy *, int, u32))cfg80211_rtw_set_wiphy_params,
 	.connect = cfg80211_rtw_connect,
 	.disconnect = cfg80211_rtw_disconnect,
 	.join_ibss = cfg80211_rtw_join_ibss,
 	.leave_ibss = cfg80211_rtw_leave_ibss,
-	.set_tx_power = cfg80211_rtw_set_txpower,
-	.get_tx_power = cfg80211_rtw_get_txpower,
+	.set_tx_power = (int (*)(struct wiphy *, struct wireless_dev *, int, enum nl80211_tx_power_setting, int))cfg80211_rtw_set_txpower,
+	.get_tx_power = (int (*)(struct wiphy *, struct wireless_dev *, int, unsigned int, int *))cfg80211_rtw_get_txpower,
 	.set_power_mgmt = cfg80211_rtw_set_power_mgmt,
 	.set_pmksa = cfg80211_rtw_set_pmksa,
 	.del_pmksa = cfg80211_rtw_del_pmksa,
