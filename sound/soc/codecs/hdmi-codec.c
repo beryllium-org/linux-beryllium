@@ -471,6 +471,16 @@ static int hdmi_codec_startup(struct snd_pcm_substream *substream,
 		if (ret)
 			goto err;
 
+		/*
+		 * No sink connected (or hotplug pending): ELD is empty,
+		 * version field is 0. Bail out silently with -ENOTCONN
+		 * to avoid log spam from repeated userspace probes.
+		 */
+		if (((hcp->eld[0] >> 3) & 0x1f) == 0) {
+			ret = -ENOTCONN;
+			goto err;
+		}
+
 		snd_parse_eld(dai->dev, &hcp->eld_parsed,
 			      hcp->eld, sizeof(hcp->eld));
 
