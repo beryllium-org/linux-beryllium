@@ -261,6 +261,11 @@ static void dw_dp_remove(struct platform_device *pdev)
 	component_del(&pdev->dev, &dw_dp_rockchip_component_ops);
 }
 
+static void dw_dp_sync_state(struct device *dev)
+{
+	pm_runtime_mark_last_busy(dev);
+}
+
 static int dw_dp_rockchip_runtime_suspend(struct device *dev)
 {
 	struct rockchip_dw_dp *dp = dev_get_drvdata(dev);
@@ -324,5 +329,6 @@ struct platform_driver dw_dp_driver = {
 		.name = "dw-dp",
 		.of_match_table = dw_dp_of_match,
 		.pm = pm_ptr(&dw_dp_pm_ops),
+		.sync_state = dw_dp_sync_state,
 	},
 };
