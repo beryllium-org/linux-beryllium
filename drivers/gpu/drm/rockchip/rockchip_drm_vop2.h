@@ -8,6 +8,7 @@
 #define _ROCKCHIP_DRM_VOP2_H
 
 #include <linux/regmap.h>
+#include <linux/reset.h>
 #include <drm/drm_modes.h>
 #include <dt-bindings/soc/rockchip,vop2.h>
 #include "rockchip_drm_drv.h"
@@ -165,6 +166,12 @@ enum vop2_win_regs {
 	VOP2_WIN_MAX_REG,
 };
 
+enum {
+	RST_ACLK,
+	RST_HCLK,
+	RST_VOP2_MAX
+};
+
 struct vop2_regs_dump {
 	const char *name;
 	u32 base;
@@ -225,6 +232,7 @@ struct vop2_video_port_data {
 	u16 gamma_lut_len;
 	u16 cubic_lut_len;
 	struct vop_rect max_output;
+	u32 max_pixel_clock_rate;
 	const u8 pre_scan_max_dly[4];
 	unsigned int offset;
 	/**
@@ -238,6 +246,7 @@ struct vop2_video_port {
 	struct vop2 *vop2;
 	struct clk *dclk;
 	struct clk *dclk_src;
+	struct reset_control *dclk_rst;
 	unsigned int id;
 	const struct vop2_video_port_data *data;
 
@@ -324,11 +333,13 @@ struct vop2 {
 	 * we need a ref counter here.
 	 */
 	unsigned int enable_count;
+	unsigned int frl_vp_count;
 	struct clk *hclk;
 	struct clk *aclk;
 	struct clk *pclk;
 	struct clk *pll_hdmiphy0;
 	struct clk *pll_hdmiphy1;
+	struct reset_control_bulk_data resets[RST_VOP2_MAX];
 
 	/* optional internal rgb encoder */
 	struct rockchip_rgb *rgb;

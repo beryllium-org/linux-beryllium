@@ -17,6 +17,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
+#include <linux/reset.h>
 #include <linux/swab.h>
 
 #include <drm/drm.h>
@@ -103,6 +104,8 @@ enum vop2_afbc_format {
 };
 
 #define VOP2_MAX_DCLK_RATE		600000000UL
+#define VOP2_ACLK_RATE_DEFAULT		500000000UL
+#define VOP2_ACLK_RATE_FRL		750000000UL
 
 /*
  * bus-format types.
@@ -957,10 +960,23 @@ static void vop2_crtc_atomic_disable(struct drm_crtc *crtc,
 
 	vop2_crtc_disable_irq(vp, VP_INT_DSP_HOLD_VALID);
 
-	if (vp->dclk_src)
+	if (vp->dclk_src) {
+		dev_info(vop2->dev, "reseting dclk parent\n");
 		clk_set_parent(vp->dclk, vp->dclk_src);
+	}
 
 	clk_disable_unprepare(vp->dclk);
+
+	if (vop2->version == VOP_VERSION_RK3588) {
+		struct rockchip_crtc_state *vcstate = to_rockchip_crtc_state(old_crtc_state);
+
+		if (vcstate->frl_enabled) {
+			vop2->frl_vp_count--;
+
+			if (!vop2->frl_vp_count)
+				clk_set_rate(vop2->aclk, VOP2_ACLK_RATE_DEFAULT);
+		}
+	}
 
 	vop2->enable_count--;
 
@@ -1441,6 +1457,9 @@ static enum drm_mode_status vop2_crtc_mode_valid(struct drm_crtc *crtc,
 	if (mode->hdisplay > vp->data->max_output.width)
 		return MODE_BAD_HVALUE;
 
+	if (mode->clock > vp->data->max_pixel_clock_rate / 1000)
+		return MODE_CLOCK_HIGH;
+
 	return MODE_OK;
 }
 
@@ -1621,6 +1640,26 @@ static int us_to_vertical_line(struct drm_display_mode *mode, int us)
 	return us * mode->clock / mode->htotal / 1000;
 }
 
+static int vop2_clk_reset(struct vop2_video_port *vp)
+{
+	struct reset_control *rstc = vp->dclk_rst;
+	struct vop2 *vop2 = vp->vop2;
+	int ret;
+
+	if (!rstc)
+		return 0;
+
+	ret = reset_control_assert(rstc);
+	if (ret < 0)
+		drm_warn(vop2->drm, "failed to assert reset\n");
+	udelay(10);
+	ret = reset_control_deassert(rstc);
+	if (ret < 0)
+		drm_warn(vop2->drm, "failed to deassert reset\n");
+
+	return ret;
+}
+
 static void vop2_crtc_atomic_enable(struct drm_crtc *crtc,
 				    struct drm_atomic_state *state)
 {
@@ -1667,6 +1706,13 @@ static void vop2_crtc_atomic_enable(struct drm_crtc *crtc,
 		vop2_enable(vop2);
 
 	vop2->enable_count++;
+
+	if (vop2->version == VOP_VERSION_RK3588 && vcstate->frl_enabled) {
+		if (!vop2->frl_vp_count)
+			clk_set_rate(vop2->aclk, VOP2_ACLK_RATE_FRL);
+
+		vop2->frl_vp_count++;
+	}
 
 	vcstate->yuv_overlay = is_yuv_output(vcstate->bus_format);
 
@@ -1768,6 +1814,7 @@ static void vop2_crtc_atomic_enable(struct drm_crtc *crtc,
 					if (!vop2->pll_hdmiphy0)
 						break;
 
+					dev_info(vop2->dev, "reparenting HDMI0 dclk\n");
 					if (!vp->dclk_src)
 						vp->dclk_src = clk_get_parent(vp->dclk);
 
@@ -1783,6 +1830,7 @@ static void vop2_crtc_atomic_enable(struct drm_crtc *crtc,
 					if (!vop2->pll_hdmiphy1)
 						break;
 
+					dev_info(vop2->dev, "reparenting HDMI1 dclk\n");
 					if (!vp->dclk_src)
 						vp->dclk_src = clk_get_parent(vp->dclk);
 
@@ -1797,6 +1845,7 @@ static void vop2_crtc_atomic_enable(struct drm_crtc *crtc,
 		}
 	}
 
+	dev_info(vop2->dev, "setting dclk rate=%lu (crt=%lu)\n", clock, clk_get_rate(vp->dclk));
 	clk_set_rate(vp->dclk, clock);
 
 	vop2_post_config(crtc);
@@ -1804,6 +1853,8 @@ static void vop2_crtc_atomic_enable(struct drm_crtc *crtc,
 	vop2_cfg_done(vp);
 
 	vop2_vp_write(vp, RK3568_VP_DSP_CTRL, dsp_ctrl);
+
+	vop2_clk_reset(vp);
 
 	vop2_crtc_atomic_try_set_gamma(vop2, vp, crtc, crtc_state);
 
@@ -2383,6 +2434,11 @@ static int vop2_create_crtcs(struct vop2 *vop2)
 		vp->id = vp_data->id;
 		vp->data = vp_data;
 
+		vp->dclk_rst = devm_reset_control_get_optional(vop2->dev, dclk_name);
+		if (IS_ERR(vp->dclk_rst))
+		        return dev_err_probe(drm->dev, PTR_ERR(vp->dclk_rst),
+					     "failed to get %s reset\n", dclk_name);
+
 		snprintf(dclk_name, sizeof(dclk_name), "dclk_vp%d", vp->id);
 		vp->dclk = devm_clk_get(vop2->dev, dclk_name);
 		if (IS_ERR(vp->dclk))
@@ -2663,6 +2719,21 @@ static int vop2_bind(struct device *dev, struct device *master, void *data)
 	vop2->drm = drm;
 
 	dev_set_drvdata(dev, vop2);
+
+	vop2->resets[RST_ACLK].id = "aclk";
+	vop2->resets[RST_HCLK].id = "hclk";
+	ret = devm_reset_control_bulk_get_optional_exclusive(vop2->dev,
+						RST_VOP2_MAX, vop2->resets);
+	if (ret)
+		return dev_err_probe(drm->dev, ret, "failed to get resets\n");
+
+	ret = reset_control_bulk_assert(RST_VOP2_MAX, vop2->resets);
+	if (ret < 0)
+		drm_warn(vop2->drm, "failed to assert resets\n");
+	udelay(10);
+	ret = reset_control_bulk_deassert(RST_VOP2_MAX, vop2->resets);
+	if (ret < 0)
+		drm_warn(vop2->drm, "failed to deassert resets\n");
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "vop");
 	if (!res)

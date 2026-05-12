@@ -535,10 +535,12 @@ struct drm_bridge_funcs {
 	 *
 	 * Check if anything is attached to the bridge output.
 	 *
-	 * This callback is optional, if not implemented the bridge will be
-	 * considered as always having a component attached to its output.
-	 * Bridges that implement this callback shall set the
-	 * DRM_BRIDGE_OP_DETECT flag in their &drm_bridge->ops.
+	 * This is the non-atomic version of detect_ctx() callback, and is
+	 * optional. If both are implemented, it is ignored. If none is
+	 * implemented, the bridge will be considered as always having a
+	 * component attached to its output. Bridges that implement this
+	 * callback shall set the DRM_BRIDGE_OP_DETECT flag in their
+	 * &drm_bridge->ops.
 	 *
 	 * RETURNS:
 	 *
@@ -546,6 +548,32 @@ struct drm_bridge_funcs {
 	 */
 	enum drm_connector_status (*detect)(struct drm_bridge *bridge,
 					    struct drm_connector *connector);
+
+	/**
+	 * @detect_ctx:
+	 *
+	 * Check if anything is attached to the bridge output.
+	 *
+	 * This is the atomic version of detect() callback, and is optional.
+	 * If both are implemented, it takes precedence. If none is implemented,
+	 * the bridge will be considered as always having a component attached
+	 * to its output. Bridges that implement this callback shall set the
+	 * DRM_BRIDGE_OP_DETECT flag in their &drm_bridge->ops.
+	 *
+	 * To avoid races against concurrent connector state updates, the
+	 * helper libraries always call this with ctx set to a valid context,
+	 * and &drm_mode_config.connection_mutex will always be locked with
+	 * the ctx parameter set to this ctx. This allows taking additional
+	 * locks as required.
+	 *
+	 * RETURNS:
+	 *
+	 * &drm_connector_status indicating the bridge output status,
+	 * or the error code returned by drm_modeset_lock(), -EDEADLK.
+	 */
+	int (*detect_ctx)(struct drm_bridge *bridge,
+			  struct drm_connector *connector,
+			  struct drm_modeset_acquire_ctx *ctx);
 
 	/**
 	 * @get_modes:
@@ -647,6 +675,20 @@ struct drm_bridge_funcs {
 	void (*hpd_disable)(struct drm_bridge *bridge);
 
 	/**
+	 * @oob_notify:
+	 *
+	 * Notify the bridge of out of band hot plug detection.
+	 *
+	 * This callback is optional, it may be implemented by bridges that
+	 * need to be notified of display connection or disconnection for
+	 * internal reasons. One use case is to force the DP controllers HPD
+	 * signal for USB-C DP AltMode.
+	 */
+	void (*oob_notify)(struct drm_bridge *bridge,
+			   struct drm_connector *connector,
+			   enum drm_connector_status status);
+
+	/**
 	 * @hdmi_tmds_char_rate_valid:
 	 *
 	 * Check whether a particular TMDS character rate is supported by the
@@ -666,6 +708,29 @@ struct drm_bridge_funcs {
 	(*hdmi_tmds_char_rate_valid)(const struct drm_bridge *bridge,
 				     const struct drm_display_mode *mode,
 				     unsigned long long tmds_rate);
+
+	/**
+	 * @hdmi_frl_rate_valid:
+	 *
+	 * Check whether a particular FRL data rate (given in bps) is
+	 * supported by the driver by using a FRL link rate that doesn't
+	 * exceed the maximum advertised by the sink (also given in bps).
+	 *
+	 * This callback is optional and should only be implemented by the
+	 * bridges that take part in the HDMI connector implementation and
+	 * need to advertise FRL support.  Bridges that implement it shall
+	 * set the DRM_BRIDGE_OP_HDMI flag in their &drm_bridge->ops.
+	 *
+	 * Returns:
+	 *
+	 * Either &drm_mode_status.MODE_OK or one of the failure reasons
+	 * in &enum drm_mode_status.
+	 */
+	enum drm_mode_status
+	(*hdmi_frl_rate_valid)(const struct drm_bridge *bridge,
+			       const struct drm_display_mode *mode,
+			       unsigned long long frl_data_rate,
+			       unsigned long long frl_max_link_rate);
 
 	/**
 	 * @hdmi_clear_avi_infoframe:
@@ -1002,8 +1067,8 @@ struct drm_bridge_timings {
 enum drm_bridge_ops {
 	/**
 	 * @DRM_BRIDGE_OP_DETECT: The bridge can detect displays connected to
-	 * its output. Bridges that set this flag shall implement the
-	 * &drm_bridge_funcs->detect callback.
+	 * its output. Bridges that set this flag shall implement either the
+	 * &drm_bridge_funcs->detect or &drm_bridge_funcs->detect_ctx callbacks.
 	 */
 	DRM_BRIDGE_OP_DETECT = BIT(0),
 	/**
@@ -1544,6 +1609,9 @@ drm_atomic_helper_bridge_propagate_bus_fmt(struct drm_bridge *bridge,
 
 enum drm_connector_status
 drm_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector);
+int drm_bridge_detect_ctx(struct drm_bridge *bridge,
+			  struct drm_connector *connector,
+			  struct drm_modeset_acquire_ctx *ctx);
 int drm_bridge_get_modes(struct drm_bridge *bridge,
 			 struct drm_connector *connector);
 const struct drm_edid *drm_bridge_edid_read(struct drm_bridge *bridge,
