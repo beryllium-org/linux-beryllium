@@ -1360,9 +1360,9 @@ EXPORT_SYMBOL(drm_atomic_bridge_chain_check);
  * @connector: attached connector
  *
  * If the bridge supports output detection, as reported by the
- * DRM_BRIDGE_OP_DETECT bridge ops flag, call &drm_bridge_funcs.detect for the
- * bridge and return the connection status. Otherwise return
- * connector_status_unknown.
+ * DRM_BRIDGE_OP_DETECT bridge ops flag, call &drm_bridge_funcs.detect_ctx
+ * or &drm_bridge_funcs.detect for the bridge and return the connection status.
+ * Otherwise return connector_status_unknown.
  *
  * RETURNS:
  * The detection status on success, or connector_status_unknown if the bridge
@@ -1371,12 +1371,68 @@ EXPORT_SYMBOL(drm_atomic_bridge_chain_check);
 enum drm_connector_status
 drm_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector)
 {
+	return drm_bridge_detect_ctx(bridge, connector, NULL);
+}
+EXPORT_SYMBOL_GPL(drm_bridge_detect);
+
+/**
+ * drm_bridge_detect_ctx - check if anything is attached to the bridge output
+ * @bridge: bridge control structure
+ * @connector: attached connector
+ * @ctx: acquire_ctx, or NULL to let this function handle locking
+ *
+ * If the bridge supports output detection, as reported by the
+ * DRM_BRIDGE_OP_DETECT bridge ops flag, call &drm_bridge_funcs.detect_ctx
+ * or &drm_bridge_funcs.detect for the bridge and return the connection status.
+ * Otherwise return connector_status_unknown.
+ *
+ * RETURNS:
+ * The detection status on success, or connector_status_unknown if the bridge
+ * doesn't support output detection.
+ * If @ctx is set, it might also return -EDEADLK.
+ */
+int drm_bridge_detect_ctx(struct drm_bridge *bridge,
+			  struct drm_connector *connector,
+			  struct drm_modeset_acquire_ctx *ctx)
+{
+	struct drm_modeset_acquire_ctx br_ctx;
+	int ret;
+
 	if (!(bridge->ops & DRM_BRIDGE_OP_DETECT))
 		return connector_status_unknown;
 
-	return bridge->funcs->detect(bridge, connector);
+	if (!bridge->funcs->detect_ctx)
+		return bridge->funcs->detect(bridge, connector);
+
+	if (ctx) {
+		ret = bridge->funcs->detect_ctx(bridge, connector, ctx);
+		if (ret == -EDEADLK)
+			return ret;
+
+		goto out;
+	}
+
+	drm_modeset_acquire_init(&br_ctx, 0);
+retry:
+	ret = drm_modeset_lock(&connector->dev->mode_config.connection_mutex,
+			       &br_ctx);
+	if (!ret)
+		ret = bridge->funcs->detect_ctx(bridge, connector, &br_ctx);
+
+	if (ret == -EDEADLK) {
+		drm_modeset_backoff(&br_ctx);
+		goto retry;
+	}
+
+	drm_modeset_drop_locks(&br_ctx);
+	drm_modeset_acquire_fini(&br_ctx);
+out:
+	if (WARN_ON(ret < 0))
+		ret = connector_status_unknown;
+
+	return ret;
 }
-EXPORT_SYMBOL_GPL(drm_bridge_detect);
+EXPORT_SYMBOL_GPL(drm_bridge_detect_ctx);
 
 /**
  * drm_bridge_get_modes - fill all modes currently valid for the sink into the
@@ -1581,6 +1637,47 @@ struct drm_bridge *of_drm_find_bridge(struct device_node *np)
 	return bridge;
 }
 EXPORT_SYMBOL(of_drm_find_bridge);
+
+/**
+ * of_drm_get_bridge_by_endpoint - return DRM bridge connected to a port/endpoint
+ * @np: device tree node containing output ports
+ * @port: port in the device tree node, or -1 for the first port found
+ * @endpoint: endpoint in the device tree node, or -1 for the first endpoint found
+ *
+ * Given a DT node's port and endpoint number, find the connected node and
+ * return the associated drm_bridge device.
+ *
+ * The refcount of the returned bridge is incremented. Use drm_bridge_put()
+ * when done with it.
+ *
+ * Returns a pointer to the connected drm_bridge, or a negative error on failure
+ */
+struct drm_bridge *of_drm_get_bridge_by_endpoint(const struct device_node *np,
+						 int port, int endpoint)
+{
+	struct drm_bridge *bridge;
+
+	/*
+	 * of_graph_get_remote_node() produces a noisy error message if port
+	 * node isn't found and the absence of the port is a legit case here,
+	 * so at first we silently check whether graph is present in the
+	 * device-tree node.
+	 */
+	if (!of_graph_is_present(np))
+		return ERR_PTR(-ENODEV);
+
+	struct device_node *remote __free(device_node) =
+		of_graph_get_remote_node(np, port, endpoint);
+	if (!remote)
+		return ERR_PTR(-ENODEV);
+
+	bridge = of_drm_find_and_get_bridge(remote);
+	if (!bridge)
+		return ERR_PTR(-EPROBE_DEFER);
+
+	return bridge;
+}
+EXPORT_SYMBOL_GPL(of_drm_get_bridge_by_endpoint);
 #endif
 
 /**
