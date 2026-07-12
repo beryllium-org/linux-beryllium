@@ -295,6 +295,7 @@ static const struct rkvdec_ctrls vdpu38x_hevc_ctrls = {
 static const struct rkvdec_ctrl_desc vdpu381_vp9_ctrl_descs[] = {
 	{
 		.cfg.id = V4L2_CID_STATELESS_VP9_FRAME,
+		.cfg.ops = &rkvdec_ctrl_ops,
 	},
 	{
 		.cfg.id = V4L2_CID_STATELESS_VP9_COMPRESSED_HDR,
@@ -302,8 +303,10 @@ static const struct rkvdec_ctrl_desc vdpu381_vp9_ctrl_descs[] = {
 	{
 		.cfg.id = V4L2_CID_MPEG_VIDEO_VP9_PROFILE,
 		.cfg.min = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
-		.cfg.max = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
+		.cfg.max = V4L2_MPEG_VIDEO_VP9_PROFILE_2,
 		.cfg.def = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
+		/* profiles 1/3 are 4:2:2/4:4:4 which VDPU381 cannot decode */
+		.cfg.menu_skip_mask = BIT(V4L2_MPEG_VIDEO_VP9_PROFILE_1),
 	},
 	{
 		.cfg.id = V4L2_CID_MPEG_VIDEO_VP9_LEVEL,
@@ -468,6 +471,17 @@ static const struct rkvdec_decoded_fmt_desc rkvdec_vp9_decoded_fmts[] = {
 	},
 };
 
+static const struct rkvdec_decoded_fmt_desc vdpu381_vp9_decoded_fmts[] = {
+	{
+		.fourcc = V4L2_PIX_FMT_NV12,
+		.image_fmt = RKVDEC_IMG_FMT_420_8BIT,
+	},
+	{
+		.fourcc = V4L2_PIX_FMT_NV15,
+		.image_fmt = RKVDEC_IMG_FMT_420_10BIT,
+	},
+};
+
 static const struct rkvdec_coded_fmt_desc rkvdec_coded_fmts[] = {
 	{
 		.fourcc = V4L2_PIX_FMT_HEVC_SLICE,
@@ -580,8 +594,8 @@ static const struct rkvdec_coded_fmt_desc vdpu381_coded_fmts[] = {
 		},
 		.ctrls = &vdpu381_vp9_ctrls,
 		.ops = &rkvdec_vdpu381_vp9_fmt_ops,
-		.num_decoded_fmts = ARRAY_SIZE(rkvdec_vp9_decoded_fmts),
-		.decoded_fmts = rkvdec_vp9_decoded_fmts,
+		.num_decoded_fmts = ARRAY_SIZE(vdpu381_vp9_decoded_fmts),
+		.decoded_fmts = vdpu381_vp9_decoded_fmts,
 		.subsystem_flags = VB2_V4L2_FL_SUPPORTS_M2M_HOLD_CAPTURE_BUF,
 	},
 };
@@ -840,6 +854,19 @@ static int rkvdec_s_output_fmt(struct file *file, void *priv,
 	 * Note that this will propagates any size changes to the decoded format.
 	 */
 	ctx->image_fmt = RKVDEC_IMG_FMT_ANY;
+
+	/*
+	 * VP9 carries bit depth in the per-frame header, not in an SPS that is
+	 * set up-front (as HEVC does). If we leave image_fmt as ANY, the CAPTURE
+	 * queue enumerates both NV12 and NV15 before the first frame control is
+	 * seen, which breaks 8-bit zero-copy clients (they end up with a wrong
+	 * import layout -> green frames). Default VP9 to 8-bit/NV12 so only that
+	 * format is exposed until a 10-bit frame switches image_fmt to NV15 via
+	 * the VP9_FRAME control's get_image_fmt() callback.
+	 */
+	if (desc->fourcc == V4L2_PIX_FMT_VP9_FRAME)
+		ctx->image_fmt = RKVDEC_IMG_FMT_420_8BIT;
+
 	rkvdec_reset_decoded_fmt(ctx);
 
 	/* Propagate colorspace information to capture. */
