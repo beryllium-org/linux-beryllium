@@ -378,12 +378,21 @@ get_ref_buf(struct rkvdec_ctx *ctx, struct vb2_v4l2_buffer *dst, u64 timestamp)
 	return vb2_to_rkvdec_decoded_buf(buf);
 }
 
-static dma_addr_t get_mv_base_addr(struct rkvdec_decoded_buffer *buf)
+static dma_addr_t get_mv_base_addr(struct rkvdec_ctx *ctx,
+				   struct rkvdec_decoded_buffer *buf)
 {
 	unsigned int aligned_pitch, aligned_height, yuv_len;
 
 	aligned_height = round_up(buf->vp9.height, 64);
-	aligned_pitch = DIV_ROUND_UP(buf->vp9.width * buf->vp9.bit_depth, 8);
+	/*
+	 * Use the real buffer stride, not one derived from the bitstream
+	 * display width: vp9.width holds frame_width_minus_1 + 1 (e.g. 1080),
+	 * while the buffers are allocated with the coded/aligned stride from
+	 * the CAPTURE format (e.g. 1088). For widths that are not a multiple
+	 * of 16 the two differ and every MV/ref access ends up skewed
+	 * (portrait videos: clean keyframe, corrupted inter frames).
+	 */
+	aligned_pitch = ctx->decoded_fmt.fmt.pix_mp.plane_fmt[0].bytesperline;
 	yuv_len = (aligned_height * aligned_pitch * 3) / 2;
 
 	return vb2_dma_contig_plane_dma_addr(&buf->base.vb.vb2_buf, 0) +
@@ -432,7 +441,8 @@ static void config_ref_registers(struct rkvdec_ctx *ctx,
 	if (&ref_buf->base.vb == run->base.bufs.dst)
 		return;
 
-	aligned_pitch = DIV_ROUND_UP(ref_buf->vp9.width * ref_buf->vp9.bit_depth, 8);
+	/* Real buffer stride, not display-width-derived (see get_mv_base_addr). */
+	aligned_pitch = ctx->decoded_fmt.fmt.pix_mp.plane_fmt[0].bytesperline;
 	y_len = aligned_height * aligned_pitch;
 	yuv_len = (y_len * 3) / 2;
 
@@ -761,7 +771,7 @@ static void config_registers(struct rkvdec_ctx *ctx,
 	else
 		mv_ref = dst;
 
-	regs->vp9_addr.vp9_refcolmv_base = get_mv_base_addr(mv_ref);
+	regs->vp9_addr.vp9_refcolmv_base = get_mv_base_addr(ctx, mv_ref);
 
 	rkvdec_write_regs(ctx);
 }

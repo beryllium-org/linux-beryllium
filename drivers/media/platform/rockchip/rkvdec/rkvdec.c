@@ -102,12 +102,31 @@ static void rkvdec_fill_decoded_pixfmt(struct rkvdec_ctx *ctx,
 				       struct v4l2_pix_format_mplane *pix_mp)
 {
 	const struct rkvdec_variant *variant = ctx->dev->variant;
+	struct v4l2_plane_pix_format *plane = &pix_mp->plane_fmt[0];
+	u32 aligned_bpl;
 
 	v4l2_fill_pixfmt_mp(pix_mp, pix_mp->pixelformat, pix_mp->width, pix_mp->height);
 
-	ctx->colmv_offset = pix_mp->plane_fmt[0].sizeimage;
+	/*
+	 * The decoder expresses the horizontal stride in units of 16 bytes
+	 * (the *_hor_virstride registers hold bytesperline / 16), so a
+	 * bytesperline that is not a multiple of 16 gets silently truncated
+	 * and every row is written with an offset (visible as full-frame
+	 * corruption). v4l2_fill_pixfmt_mp() returns the minimal packed
+	 * stride, which breaks e.g. NV12 at width 1080 or NV15 at width 2160
+	 * (any portrait video). Align the stride to 64 bytes like the vendor
+	 * MPP library does and scale sizeimage accordingly (sizeimage is an
+	 * exact multiple of bytesperline for the semi-planar layouts here).
+	 */
+	aligned_bpl = ALIGN(plane->bytesperline, 64);
+	if (aligned_bpl != plane->bytesperline) {
+		plane->sizeimage = plane->sizeimage / plane->bytesperline * aligned_bpl;
+		plane->bytesperline = aligned_bpl;
+	}
 
-	pix_mp->plane_fmt[0].sizeimage += variant->ops->colmv_size(pix_mp->width, pix_mp->height);
+	ctx->colmv_offset = plane->sizeimage;
+
+	plane->sizeimage += variant->ops->colmv_size(pix_mp->width, pix_mp->height);
 }
 
 static void rkvdec_reset_fmt(struct rkvdec_ctx *ctx, struct v4l2_format *f,
