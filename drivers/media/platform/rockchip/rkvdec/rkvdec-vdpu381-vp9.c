@@ -776,10 +776,41 @@ static void config_registers(struct rkvdec_ctx *ctx,
 	rkvdec_write_regs(ctx);
 }
 
+static int rkvdec_vp9_check_caps(struct rkvdec_ctx *ctx, u8 profile, u8 bit_depth)
+{
+	/*
+	 * The decoder only outputs 4:2:0 8-bit (NV12) or 4:2:0 10-bit (NV15).
+	 * Profiles 1 and 3 carry 4:2:2, 4:4:0 or 4:4:4 content, and profile 2
+	 * also allows 12-bit. Neither is representable in a capture buffer
+	 * this driver can allocate, and neither is rejected anywhere else:
+	 * the VP9_PROFILE menu control is independent of the stateless frame
+	 * control read here, and rkvdec_vp9_get_image_fmt() returns
+	 * RKVDEC_IMG_FMT_ANY for a bit depth it does not know, which imposes
+	 * no constraint at all. A 12-bit stream then programs the register
+	 * strides from the bitstream bit depth and walks the hardware past
+	 * the end of the plane.
+	 */
+	if ((profile != 0 && profile != 2) ||
+	    (bit_depth != 8 && bit_depth != 10)) {
+		dev_err_ratelimited(ctx->dev->dev,
+				    "unsupported profile %u bit depth %u\n",
+				    profile, bit_depth);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int validate_dec_params(struct rkvdec_ctx *ctx,
 			       const struct v4l2_ctrl_vp9_frame *dec_params)
 {
 	unsigned int aligned_width, aligned_height;
+	int ret;
+
+	ret = rkvdec_vp9_check_caps(ctx, dec_params->profile,
+				    dec_params->bit_depth);
+	if (ret)
+		return ret;
 
 	aligned_width = round_up(dec_params->frame_width_minus_1 + 1, 64);
 	aligned_height = round_up(dec_params->frame_height_minus_1 + 1, 64);
@@ -1160,7 +1191,20 @@ rkvdec_vp9_get_image_fmt(struct rkvdec_ctx *ctx, struct v4l2_ctrl *ctrl)
 	}
 }
 
+static int rkvdec_vp9_try_ctrl(struct rkvdec_ctx *ctx, struct v4l2_ctrl *ctrl)
+{
+	if (ctrl->id == V4L2_CID_STATELESS_VP9_FRAME) {
+		const struct v4l2_ctrl_vp9_frame *frame = ctrl->p_new.p_vp9_frame;
+
+		return rkvdec_vp9_check_caps(ctx, frame->profile,
+					     frame->bit_depth);
+	}
+
+	return 0;
+}
+
 const struct rkvdec_coded_fmt_ops rkvdec_vdpu381_vp9_fmt_ops = {
+	.try_ctrl = rkvdec_vp9_try_ctrl,
 	.adjust_fmt = rkvdec_vp9_adjust_fmt,
 	.start = rkvdec_vp9_start,
 	.stop = rkvdec_vp9_stop,
