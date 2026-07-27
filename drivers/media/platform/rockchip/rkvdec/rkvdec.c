@@ -1496,11 +1496,15 @@ err_unregister_v4l2:
 	return ret;
 }
 
-static void rkvdec_v4l2_cleanup(struct rkvdec_dev *rkvdec)
+static void rkvdec_v4l2_unregister(struct rkvdec_dev *rkvdec)
 {
 	media_device_unregister(&rkvdec->mdev);
 	v4l2_m2m_unregister_media_controller(rkvdec->m2m_dev);
 	video_unregister_device(&rkvdec->vdev);
+}
+
+static void rkvdec_v4l2_release(struct rkvdec_dev *rkvdec)
+{
 	media_device_cleanup(&rkvdec->mdev);
 	v4l2_m2m_release(rkvdec->m2m_dev);
 	v4l2_device_unregister(&rkvdec->v4l2_dev);
@@ -1956,13 +1960,15 @@ static void rkvdec_remove(struct platform_device *pdev)
 
 	cancel_delayed_work_sync(&rkvdec->watchdog_work);
 
+	rkvdec_v4l2_unregister(rkvdec);
+
 	pm_runtime_dont_use_autosuspend(&pdev->dev);
 
 	if (rkvdec->empty_domain)
 		iommu_domain_free(rkvdec->empty_domain);
 
 	pm_runtime_disable(&pdev->dev);
-	rkvdec_v4l2_cleanup(rkvdec);
+	rkvdec_v4l2_release(rkvdec);
 }
 
 #ifdef CONFIG_PM
