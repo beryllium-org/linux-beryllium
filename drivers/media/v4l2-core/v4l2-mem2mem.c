@@ -128,6 +128,7 @@ void v4l2_m2m_set_max_parallel_jobs(struct v4l2_m2m_dev *m2m_dev,
 {
 	m2m_dev->max_parallel_jobs = max_parallel_jobs;
 }
+EXPORT_SYMBOL_GPL(v4l2_m2m_set_max_parallel_jobs);
 
 struct vb2_queue *v4l2_m2m_get_vq(struct v4l2_m2m_ctx *m2m_ctx,
 				       enum v4l2_buf_type type)
