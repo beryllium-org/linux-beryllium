@@ -1651,6 +1651,18 @@
 			      "pll_hdmiphy0";
 		iommus = <&vop_mmu>;
 		power-domains = <&power RK3588_PD_VOP>;
+		resets = <&cru SRST_A_VOP>,
+			 <&cru SRST_H_VOP>,
+			 <&cru SRST_D_VOP0>,
+			 <&cru SRST_D_VOP1>,
+			 <&cru SRST_D_VOP2>,
+			 <&cru SRST_D_VOP3>;
+		reset-names = "aclk",
+			      "hclk",
+			      "dclk_vp0",
+			      "dclk_vp1",
+			      "dclk_vp2",
+			      "dclk_vp3";
 		rockchip,grf = <&sys_grf>;
 		rockchip,vop-grf = <&vop_grf>;
 		rockchip,vo1-grf = <&vo1_grf>;
@@ -1848,7 +1860,7 @@
 		phys = <&usbdp_phy0 PHY_TYPE_DP>;
 		power-domains = <&power RK3588_PD_VO0>;
 		resets = <&cru SRST_DP0>;
-		#sound-dai-cells = <0>;
+		#sound-dai-cells = <1>;
 		status = "disabled";
 
 		ports {
