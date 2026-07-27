@@ -39,6 +39,12 @@
  */
 #define RKVDEC_VP9_MAX_SEGMAP_SIZE	524288
 
+static inline size_t rkvdec_vp9_segmap_size(unsigned int width,
+					    unsigned int height)
+{
+	return DIV_ROUND_UP(width, 64) * DIV_ROUND_UP(height, 64) * 64;
+}
+
 struct rkvdec_vp9_intra_mode_probs {
     u8 y_mode[105];
     u8 uv_mode[23];
@@ -825,6 +831,14 @@ static int validate_dec_params(struct rkvdec_ctx *ctx,
 			"unexpected bitstream resolution %dx%d\n",
 			dec_params->frame_width_minus_1 + 1,
 			dec_params->frame_height_minus_1 + 1);
+		return -EINVAL;
+	}
+
+	if (rkvdec_vp9_segmap_size(aligned_width, aligned_height) >
+	    RKVDEC_VP9_MAX_SEGMAP_SIZE) {
+		dev_err(ctx->dev->dev,
+			"resolution %ux%u exceeds the segment map capacity\n",
+			aligned_width, aligned_height);
 		return -EINVAL;
 	}
 
