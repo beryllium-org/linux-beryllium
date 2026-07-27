@@ -48,6 +48,10 @@
 	status = "okay";
 };
 
+&crypto {
+	status = "okay";
+};
+
 &hdmi_receiver_sound {
 	status = "okay";
 };
