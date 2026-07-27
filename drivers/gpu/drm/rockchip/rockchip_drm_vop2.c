@@ -960,10 +960,8 @@ static void vop2_crtc_atomic_disable(struct drm_crtc *crtc,
 
 	vop2_crtc_disable_irq(vp, VP_INT_DSP_HOLD_VALID);
 
-	if (vp->dclk_src) {
-		dev_info(vop2->dev, "reseting dclk parent\n");
+	if (vp->dclk_src)
 		clk_set_parent(vp->dclk, vp->dclk_src);
-	}
 
 	clk_disable_unprepare(vp->dclk);
 
@@ -1814,7 +1812,6 @@ static void vop2_crtc_atomic_enable(struct drm_crtc *crtc,
 					if (!vop2->pll_hdmiphy0)
 						break;
 
-					dev_info(vop2->dev, "reparenting HDMI0 dclk\n");
 					if (!vp->dclk_src)
 						vp->dclk_src = clk_get_parent(vp->dclk);
 
@@ -1830,7 +1827,6 @@ static void vop2_crtc_atomic_enable(struct drm_crtc *crtc,
 					if (!vop2->pll_hdmiphy1)
 						break;
 
-					dev_info(vop2->dev, "reparenting HDMI1 dclk\n");
 					if (!vp->dclk_src)
 						vp->dclk_src = clk_get_parent(vp->dclk);
 
@@ -1845,9 +1841,7 @@ static void vop2_crtc_atomic_enable(struct drm_crtc *crtc,
 		}
 	}
 
-	dev_info(vop2->dev, "current dclk rate=%lu\n", clk_get_rate(vp->dclk));
 	clk_set_rate(vp->dclk, clock);
-	dev_info(vop2->dev, "setting dclk to rate=%lu: result=%lu\n", clock, clk_get_rate(vp->dclk));
 
 	vop2_post_config(crtc);
 

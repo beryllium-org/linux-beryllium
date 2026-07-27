@@ -766,10 +766,8 @@ int dp_altmode_probe(struct typec_altmode *alt)
 	struct dp_altmode *dp;
 
 	/* Port can only be DFP_U. */
-	if (typec_altmode_get_data_role(alt) != TYPEC_HOST) {
-		dev_err(alt->dev.parent->parent, "Cannot probe DP AltMode as data-role is not HOST\n");
+	if (typec_altmode_get_data_role(alt) != TYPEC_HOST)
 		return -EPROTO;
-	}
 
 	/* Make sure we have compatible pin configurations */
 	if (!(DP_CAP_PIN_ASSIGN_DFP_D(port->vdo) &
@@ -777,7 +775,6 @@ int dp_altmode_probe(struct typec_altmode *alt)
 	    !(DP_CAP_PIN_ASSIGN_UFP_D(port->vdo) &
 	      DP_CAP_PIN_ASSIGN_DFP_D(alt->vdo))) {
 		typec_altmode_put_plug(plug);
-		dev_err(alt->dev.parent->parent, "Cannot probe DP AltMode due to incorrect pin assignment\n");
 		return -ENODEV;
 	}
 
