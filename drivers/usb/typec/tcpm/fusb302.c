@@ -149,8 +149,6 @@ static void _fusb302_log(struct fusb302_chip *chip, const char *fmt,
 
 	vsnprintf(tmpbuffer, sizeof(tmpbuffer), fmt, args);
 
-	dev_dbg(chip->dev, "%s\n", tmpbuffer);
-
 	mutex_lock(&chip->logbuffer_lock);
 
 	if (fusb302_log_full(chip)) {
