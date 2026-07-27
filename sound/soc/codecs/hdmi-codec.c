@@ -447,6 +447,7 @@ static int hdmi_codec_startup(struct snd_pcm_substream *substream,
 	bool tx = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
 	bool has_capture = !hcp->hcd.no_i2s_capture;
 	bool has_playback = !hcp->hcd.no_i2s_playback;
+	bool started = false;
 	int ret = 0;
 
 	if (!((has_playback && tx) || (has_capture && !tx)))
@@ -463,6 +464,7 @@ static int hdmi_codec_startup(struct snd_pcm_substream *substream,
 		ret = hcp->hcd.ops->audio_startup(dai->dev->parent, hcp->hcd.data);
 		if (ret)
 			goto err;
+		started = true;
 	}
 
 	if (tx && hcp->hcd.ops->get_eld) {
@@ -495,6 +497,9 @@ static int hdmi_codec_startup(struct snd_pcm_substream *substream,
 	hcp->busy = true;
 
 err:
+	if (ret && started)
+		hcp->hcd.ops->audio_shutdown(dai->dev->parent, hcp->hcd.data);
+
 	mutex_unlock(&hcp->lock);
 	return ret;
 }
