@@ -500,7 +500,10 @@ drm_bridge_atomic_create_priv_state(struct drm_private_obj *obj)
 	struct drm_bridge *bridge = drm_priv_to_bridge(obj);
 	struct drm_bridge_state *state;
 
-	state = bridge->funcs->atomic_reset(bridge);
+	if (bridge->funcs->atomic_create_state)
+		state = bridge->funcs->atomic_create_state(bridge);
+	else
+		state = bridge->funcs->atomic_reset(bridge);
 	if (IS_ERR(state))
 		return ERR_CAST(state);
 
@@ -515,7 +518,8 @@ static const struct drm_private_state_funcs drm_bridge_priv_state_funcs = {
 
 static bool drm_bridge_is_atomic(struct drm_bridge *bridge)
 {
-	return bridge->funcs->atomic_reset != NULL;
+	return (bridge->funcs->atomic_create_state ||
+		bridge->funcs->atomic_reset);
 }
 
 /**
@@ -1361,9 +1365,9 @@ EXPORT_SYMBOL(drm_atomic_bridge_chain_check);
  * @connector: attached connector
  *
  * If the bridge supports output detection, as reported by the
- * DRM_BRIDGE_OP_DETECT bridge ops flag, call &drm_bridge_funcs.detect for the
- * bridge and return the connection status. Otherwise return
- * connector_status_unknown.
+ * DRM_BRIDGE_OP_DETECT bridge ops flag, call &drm_bridge_funcs.detect_ctx
+ * or &drm_bridge_funcs.detect for the bridge and return the connection status.
+ * Otherwise return connector_status_unknown.
  *
  * RETURNS:
  * The detection status on success, or connector_status_unknown if the bridge
@@ -1372,12 +1376,68 @@ EXPORT_SYMBOL(drm_atomic_bridge_chain_check);
 enum drm_connector_status
 drm_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector)
 {
+	return drm_bridge_detect_ctx(bridge, connector, NULL);
+}
+EXPORT_SYMBOL_GPL(drm_bridge_detect);
+
+/**
+ * drm_bridge_detect_ctx - check if anything is attached to the bridge output
+ * @bridge: bridge control structure
+ * @connector: attached connector
+ * @ctx: acquire_ctx, or NULL to let this function handle locking
+ *
+ * If the bridge supports output detection, as reported by the
+ * DRM_BRIDGE_OP_DETECT bridge ops flag, call &drm_bridge_funcs.detect_ctx
+ * or &drm_bridge_funcs.detect for the bridge and return the connection status.
+ * Otherwise return connector_status_unknown.
+ *
+ * RETURNS:
+ * The detection status on success, or connector_status_unknown if the bridge
+ * doesn't support output detection.
+ * If @ctx is set, it might also return -EDEADLK.
+ */
+int drm_bridge_detect_ctx(struct drm_bridge *bridge,
+			  struct drm_connector *connector,
+			  struct drm_modeset_acquire_ctx *ctx)
+{
+	struct drm_modeset_acquire_ctx br_ctx;
+	int ret;
+
 	if (!(bridge->ops & DRM_BRIDGE_OP_DETECT))
 		return connector_status_unknown;
 
-	return bridge->funcs->detect(bridge, connector);
+	if (!bridge->funcs->detect_ctx)
+		return bridge->funcs->detect(bridge, connector);
+
+	if (ctx) {
+		ret = bridge->funcs->detect_ctx(bridge, connector, ctx);
+		if (ret == -EDEADLK)
+			return ret;
+
+		goto out;
+	}
+
+	drm_modeset_acquire_init(&br_ctx, 0);
+retry:
+	ret = drm_modeset_lock(&connector->dev->mode_config.connection_mutex,
+			       &br_ctx);
+	if (!ret)
+		ret = bridge->funcs->detect_ctx(bridge, connector, &br_ctx);
+
+	if (ret == -EDEADLK) {
+		drm_modeset_backoff(&br_ctx);
+		goto retry;
+	}
+
+	drm_modeset_drop_locks(&br_ctx);
+	drm_modeset_acquire_fini(&br_ctx);
+out:
+	if (WARN_ON(ret < 0))
+		ret = connector_status_unknown;
+
+	return ret;
 }
-EXPORT_SYMBOL_GPL(drm_bridge_detect);
+EXPORT_SYMBOL_GPL(drm_bridge_detect_ctx);
 
 /**
  * drm_bridge_get_modes - fill all modes currently valid for the sink into the
@@ -1705,7 +1765,7 @@ static int encoder_bridges_show(struct seq_file *m, void *data)
 	struct drm_printer p = drm_seq_file_printer(m);
 	unsigned int idx = 0;
 
-	drm_for_each_bridge_in_chain_scoped(encoder, bridge)
+	drm_for_each_bridge_in_chain(encoder, bridge)
 		drm_bridge_debugfs_show_bridge(&p, bridge, idx++, false, true);
 
 	return 0;

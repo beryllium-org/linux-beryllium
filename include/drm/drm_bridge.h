@@ -531,14 +531,32 @@ struct drm_bridge_funcs {
 	struct drm_bridge_state *(*atomic_reset)(struct drm_bridge *bridge);
 
 	/**
+	 * @atomic_create_state:
+	 *
+	 * Allocate a pristine, initialized, state for the bridge
+	 * object and return it. This callback must have no side
+	 * effects: in particular, the returned state must not be
+	 * assigned to the object's state pointer and it must not affect
+	 * the hardware state.
+	 *
+	 * RETURNS:
+	 *
+	 * A new, pristine, bridge state instance or an error pointer
+	 * on failure.
+	 */
+	struct drm_bridge_state *(*atomic_create_state)(struct drm_bridge *bridge);
+
+	/**
 	 * @detect:
 	 *
 	 * Check if anything is attached to the bridge output.
 	 *
-	 * This callback is optional, if not implemented the bridge will be
-	 * considered as always having a component attached to its output.
-	 * Bridges that implement this callback shall set the
-	 * DRM_BRIDGE_OP_DETECT flag in their &drm_bridge->ops.
+	 * This is the non-atomic version of detect_ctx() callback, and is
+	 * optional. If both are implemented, it is ignored. If none is
+	 * implemented, the bridge will be considered as always having a
+	 * component attached to its output. Bridges that implement this
+	 * callback shall set the DRM_BRIDGE_OP_DETECT flag in their
+	 * &drm_bridge->ops.
 	 *
 	 * RETURNS:
 	 *
@@ -546,6 +564,32 @@ struct drm_bridge_funcs {
 	 */
 	enum drm_connector_status (*detect)(struct drm_bridge *bridge,
 					    struct drm_connector *connector);
+
+	/**
+	 * @detect_ctx:
+	 *
+	 * Check if anything is attached to the bridge output.
+	 *
+	 * This is the atomic version of detect() callback, and is optional.
+	 * If both are implemented, it takes precedence. If none is implemented,
+	 * the bridge will be considered as always having a component attached
+	 * to its output. Bridges that implement this callback shall set the
+	 * DRM_BRIDGE_OP_DETECT flag in their &drm_bridge->ops.
+	 *
+	 * To avoid races against concurrent connector state updates, the
+	 * helper libraries always call this with ctx set to a valid context,
+	 * and &drm_mode_config.connection_mutex will always be locked with
+	 * the ctx parameter set to this ctx. This allows taking additional
+	 * locks as required.
+	 *
+	 * RETURNS:
+	 *
+	 * &drm_connector_status indicating the bridge output status,
+	 * or the error code returned by drm_modeset_lock(), -EDEADLK.
+	 */
+	int (*detect_ctx)(struct drm_bridge *bridge,
+			  struct drm_connector *connector,
+			  struct drm_modeset_acquire_ctx *ctx);
 
 	/**
 	 * @get_modes:
@@ -647,6 +691,20 @@ struct drm_bridge_funcs {
 	void (*hpd_disable)(struct drm_bridge *bridge);
 
 	/**
+	 * @oob_notify:
+	 *
+	 * Notify the bridge of out of band hot plug detection.
+	 *
+	 * This callback is optional, it may be implemented by bridges that
+	 * need to be notified of display connection or disconnection for
+	 * internal reasons. One use case is to force the DP controllers HPD
+	 * signal for USB-C DP AltMode.
+	 */
+	void (*oob_notify)(struct drm_bridge *bridge,
+			   struct drm_connector *connector,
+			   enum drm_connector_status status);
+
+	/**
 	 * @hdmi_tmds_char_rate_valid:
 	 *
 	 * Check whether a particular TMDS character rate is supported by the
@@ -666,6 +724,29 @@ struct drm_bridge_funcs {
 	(*hdmi_tmds_char_rate_valid)(const struct drm_bridge *bridge,
 				     const struct drm_display_mode *mode,
 				     unsigned long long tmds_rate);
+
+	/**
+	 * @hdmi_frl_rate_valid:
+	 *
+	 * Check whether a particular FRL data rate (given in bps) is
+	 * supported by the driver by using a FRL link rate that doesn't
+	 * exceed the maximum advertised by the sink (also given in bps).
+	 *
+	 * This callback is optional and should only be implemented by the
+	 * bridges that take part in the HDMI connector implementation and
+	 * need to advertise FRL support.  Bridges that implement it shall
+	 * set the DRM_BRIDGE_OP_HDMI flag in their &drm_bridge->ops.
+	 *
+	 * Returns:
+	 *
+	 * Either &drm_mode_status.MODE_OK or one of the failure reasons
+	 * in &enum drm_mode_status.
+	 */
+	enum drm_mode_status
+	(*hdmi_frl_rate_valid)(const struct drm_bridge *bridge,
+			       const struct drm_display_mode *mode,
+			       unsigned long long frl_data_rate,
+			       unsigned long long frl_max_link_rate);
 
 	/**
 	 * @hdmi_clear_avi_infoframe:
@@ -1002,8 +1083,8 @@ struct drm_bridge_timings {
 enum drm_bridge_ops {
 	/**
 	 * @DRM_BRIDGE_OP_DETECT: The bridge can detect displays connected to
-	 * its output. Bridges that set this flag shall implement the
-	 * &drm_bridge_funcs->detect callback.
+	 * its output. Bridges that set this flag shall implement either the
+	 * &drm_bridge_funcs->detect or &drm_bridge_funcs->detect_ctx callbacks.
 	 */
 	DRM_BRIDGE_OP_DETECT = BIT(0),
 	/**
@@ -1371,7 +1452,8 @@ drm_bridge_get_current_state(struct drm_bridge *bridge)
 	 * drm_atomic_private_obj_init(), so we need to make sure we're
 	 * working with one before we try to use the lock.
 	 */
-	if (!bridge->funcs || !bridge->funcs->atomic_reset)
+	if (!bridge->funcs ||
+	    !(bridge->funcs->atomic_reset || bridge->funcs->atomic_create_state))
 		return NULL;
 
 	drm_modeset_lock_assert_held(&bridge->base.lock);
@@ -1481,9 +1563,9 @@ static inline struct drm_bridge *__drm_for_each_bridge_in_chain_next(struct drm_
 DEFINE_FREE(__drm_for_each_bridge_in_chain_cleanup, struct drm_bridge *,
 	if (_T) { mutex_unlock(&_T->encoder->bridge_chain_mutex); drm_bridge_put(_T); })
 
-/* Internal to drm_for_each_bridge_in_chain_scoped() */
+/* Internal to drm_for_each_bridge_in_chain() */
 static inline struct drm_bridge *
-__drm_for_each_bridge_in_chain_scoped_start(struct drm_encoder *encoder)
+__drm_for_each_bridge_in_chain_start(struct drm_encoder *encoder)
 {
 	mutex_lock(&encoder->bridge_chain_mutex);
 
@@ -1496,8 +1578,7 @@ __drm_for_each_bridge_in_chain_scoped_start(struct drm_encoder *encoder)
 }
 
 /**
- * drm_for_each_bridge_in_chain_scoped - iterate over all bridges attached
- *                                       to an encoder
+ * drm_for_each_bridge_in_chain - iterate over all bridges attached to an encoder
  * @encoder: the encoder to iterate bridges on
  * @bridge: a bridge pointer updated to point to the current bridge at each
  *	    iteration
@@ -1507,9 +1588,9 @@ __drm_for_each_bridge_in_chain_scoped_start(struct drm_encoder *encoder)
  * Automatically gets/puts the bridge reference while iterating and locks
  * the encoder chain mutex to prevent chain modifications while iterating.
  */
-#define drm_for_each_bridge_in_chain_scoped(encoder, bridge)				\
+#define drm_for_each_bridge_in_chain(encoder, bridge)					\
 	for (struct drm_bridge *bridge __free(__drm_for_each_bridge_in_chain_cleanup) =	\
-		__drm_for_each_bridge_in_chain_scoped_start((encoder));			\
+		__drm_for_each_bridge_in_chain_start((encoder));			\
 	     bridge;									\
 	     bridge = __drm_for_each_bridge_in_chain_next(bridge))			\
 
@@ -1572,6 +1653,9 @@ drm_atomic_helper_bridge_propagate_bus_fmt(struct drm_bridge *bridge,
 
 enum drm_connector_status
 drm_bridge_detect(struct drm_bridge *bridge, struct drm_connector *connector);
+int drm_bridge_detect_ctx(struct drm_bridge *bridge,
+			  struct drm_connector *connector,
+			  struct drm_modeset_acquire_ctx *ctx);
 int drm_bridge_get_modes(struct drm_bridge *bridge,
 			 struct drm_connector *connector);
 const struct drm_edid *drm_bridge_edid_read(struct drm_bridge *bridge,

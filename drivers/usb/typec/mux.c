@@ -57,6 +57,8 @@ static void *typec_switch_match(const struct fwnode_handle *fwnode,
 	 */
 	dev = class_find_device(&typec_mux_class, NULL, fwnode,
 				switch_fwnode_match);
+	if (!dev)
+		return ERR_PTR(-EPROBE_DEFER);
 
 	/* Skip duplicates */
 	for (i = 0; i < TYPEC_MUX_MAX_DEVS; i++)
@@ -65,7 +67,7 @@ static void *typec_switch_match(const struct fwnode_handle *fwnode,
 			return NULL;
 		}
 
-	return dev ? to_typec_switch_dev(dev) : ERR_PTR(-EPROBE_DEFER);
+	return to_typec_switch_dev(dev);
 }
 
 /**
@@ -79,7 +81,7 @@ static void *typec_switch_match(const struct fwnode_handle *fwnode,
  */
 struct typec_switch *fwnode_typec_switch_get(struct fwnode_handle *fwnode)
 {
-	struct typec_switch_dev *sw_devs[TYPEC_MUX_MAX_DEVS];
+	struct typec_switch_dev *sw_devs[TYPEC_MUX_MAX_DEVS] = { };
 	struct typec_switch *sw;
 	int count;
 	int err;
@@ -275,7 +277,9 @@ static int mux_fwnode_match(struct device *dev, const void *fwnode)
 static void *typec_mux_match(const struct fwnode_handle *fwnode,
 			     const char *id, void *data)
 {
+	struct typec_mux_dev **mux_devs = data;
 	struct device *dev;
+	int i;
 
 	/*
 	 * Device graph (OF graph) does not give any means to identify the
@@ -291,6 +295,14 @@ static void *typec_mux_match(const struct fwnode_handle *fwnode,
 	dev = class_find_device(&typec_mux_class, NULL, fwnode,
 				mux_fwnode_match);
 
+	/* Skip duplicates */
+	for (i = 0; i < TYPEC_MUX_MAX_DEVS; i++)
+		if (to_typec_mux_dev(dev) == mux_devs[i]) {
+			put_device(dev);
+			return NULL;
+		}
+
+
 	return dev ? to_typec_mux_dev(dev) : ERR_PTR(-EPROBE_DEFER);
 }
 
@@ -305,7 +317,7 @@ static void *typec_mux_match(const struct fwnode_handle *fwnode,
  */
 struct typec_mux *fwnode_typec_mux_get(struct fwnode_handle *fwnode)
 {
-	struct typec_mux_dev *mux_devs[TYPEC_MUX_MAX_DEVS];
+	struct typec_mux_dev *mux_devs[TYPEC_MUX_MAX_DEVS] = { };
 	struct typec_mux *mux;
 	int count;
 	int err;
@@ -316,7 +328,8 @@ struct typec_mux *fwnode_typec_mux_get(struct fwnode_handle *fwnode)
 		return ERR_PTR(-ENOMEM);
 
 	count = fwnode_connection_find_matches(fwnode, "mode-switch",
-					       NULL, typec_mux_match,
+					       (void **)mux_devs,
+					       typec_mux_match,
 					       (void **)mux_devs,
 					       ARRAY_SIZE(mux_devs));
 	if (count <= 0) {
