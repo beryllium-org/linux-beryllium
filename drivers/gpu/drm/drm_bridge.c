@@ -453,18 +453,29 @@ void drm_bridge_add(struct drm_bridge *bridge)
 	 * If the bridge was previously added and then removed, it is now
 	 * in bridge_lingering_list. Remove it or bridge_lingering_list will be
 	 * corrupted when adding this bridge to bridge_list below.
+	 *
+	 * Legacy drivers that allocate the bridge with kzalloc() rather than
+	 * devm_drm_bridge_alloc() leave list.next NULL. Such a bridge cannot
+	 * be on any list, and list_del_init() would dereference NULL, so
+	 * initialize the list head first.
 	 */
 	mutex_lock(&bridge_lock);
-	if (!list_empty(&bridge->list))
+	if (!bridge->list.next)
+		INIT_LIST_HEAD(&bridge->list);
+	else if (!list_empty(&bridge->list))
 		list_del_init(&bridge->list);
 	mutex_unlock(&bridge_lock);
 
 	mutex_init(&bridge->hpd_state_mutex);
 	mutex_init(&bridge->hpd_mutex);
 
-	if (bridge->ops & DRM_BRIDGE_OP_HDMI)
+	if (bridge->ops & DRM_BRIDGE_OP_HDMI) {
+		if (bridge->supported_hdmi_ver == HDMI_VERSION_UNKNOWN)
+			DRM_WARN("HDMI bridge misses supported HDMI version\n");
+
 		bridge->ycbcr_420_allowed = !!(bridge->supported_formats &
 					       BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR420));
+	}
 
 	mutex_lock(&bridge_lock);
 	list_add_tail(&bridge->list, &bridge_list);

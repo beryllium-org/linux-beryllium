@@ -28,6 +28,7 @@
 #include <linux/ctype.h>
 #include <linux/hdmi.h>
 #include <linux/notifier.h>
+#include <linux/workqueue.h>
 #include <drm/drm_mode_object.h>
 #include <drm/drm_util.h>
 #include <drm/drm_property.h>
@@ -1131,6 +1132,34 @@ struct drm_connector_hdmi_state {
 	 * @tmds_char_rate: TMDS Character Rate, in Hz.
 	 */
 	unsigned long long tmds_char_rate;
+
+	/**
+	 * @scrambler_needed: Whether HDMI 2.0 SCDC scrambling is required
+	 * for the negotiated mode/bpc/format.
+	 *
+	 * Computed by drm_atomic_helper_connector_hdmi_check() according to
+	 * the HDMI 2.0 specification: scrambling is mandatory above a 340 MHz
+	 * TMDS character rate. Optional scrambling at lower rates is
+	 * deliberately not requested by the helper.
+	 */
+	bool scrambler_needed;
+
+	/**
+	 * @frl_rate_per_lane: Per-lane FRL bit rate, in Gbps, for the
+	 * negotiated mode/bpc/format.
+	 *
+	 * Set by drm_atomic_helper_connector_hdmi_check() when the mode
+	 * cannot be carried over plain TMDS.
+	 */
+	u8 frl_rate_per_lane;
+
+	/**
+	 * @frl_lanes: Number of FRL lanes for the negotiated mode/bpc/format.
+	 *
+	 * Set by drm_atomic_helper_connector_hdmi_check() when the mode
+	 * cannot be carried over plain TMDS.
+	 */
+	u8 frl_lanes;
 };
 
 /**
@@ -1403,8 +1432,52 @@ struct drm_connector_infoframe_funcs {
 
 /**
  * struct drm_connector_hdmi_funcs - drm_hdmi_connector control functions
+ * and controller capabilities
  */
 struct drm_connector_hdmi_funcs {
+	/**
+	 * @vendor: HDMI Controller Vendor name, at most
+	 * HDMI_SPD_INFOFRAME_VENDOR_LEN characters long.
+	 */
+	const char *vendor;
+
+	/**
+	 * @product: HDMI Controller Product name, at most
+	 * HDMI_SPD_INFOFRAME_PRODUCT_LEN characters long.
+	 */
+	const char *product;
+
+	/**
+	 * @supported_hdmi_ver:
+	 *
+	 * Maximum HDMI specification version supported by the controller side
+	 * of this connector. This describes the controller capability only;
+	 * the effective link capabilities may be further restricted by the
+	 * sink, bridge, or mode validation.
+	 */
+	enum hdmi_version supported_hdmi_ver;
+
+	/**
+	 * @supported_tmds_char_rate:
+	 *
+	 * Maximum TMDS character rate supported by the controller, in Hz.
+	 * A value of 0 means the core should use the default limit implied by
+	 * @supported_hdmi_ver.
+	 */
+	unsigned long long supported_tmds_char_rate;
+
+	/**
+	 * @supported_formats:
+	 *
+	 * Bitmask of @drm_output_color_format listing supported output formats.
+	 */
+	unsigned long supported_formats;
+
+	/**
+	 * @max_bpc: Maximum bits per char the HDMI connector supports.
+	 */
+	unsigned int max_bpc;
+
 	/**
 	 * @tmds_char_rate_valid:
 	 *
@@ -1425,6 +1498,35 @@ struct drm_connector_hdmi_funcs {
 				unsigned long long tmds_rate);
 
 	/**
+	 * @frl_rate_valid:
+	 *
+	 * This callback is invoked at atomic_check time to let the driver
+	 * apply additional constraints on top of the FRL rate range
+	 * already deemed valid for @mode by the Source and the Sink.
+	 *
+	 * @min_frl_rate and @max_frl_rate give the inclusive range of
+	 * supported FRL rates, in Gbps. The driver may optionally write a
+	 * preferred rate into @pref_frl_rate, which must fall within that
+	 * range; the core clamps it regardless, but drivers should not
+	 * rely on that. @pref_frl_rate is 0 on entry, and is left
+	 * untouched if the driver has no preference, in which case the
+	 * core defaults to @max_frl_rate.
+	 *
+	 * The @frl_rate_valid callback is optional.
+	 *
+	 * Returns:
+	 *
+	 * Either &drm_mode_status.MODE_OK or one of the failure reasons
+	 * in &enum drm_mode_status.
+	 */
+	enum drm_mode_status
+	(*frl_rate_valid)(const struct drm_connector *connector,
+			  const struct drm_display_mode *mode,
+			  unsigned int min_frl_rate,
+			  unsigned int max_frl_rate,
+			  unsigned int *pref_frl_rate);
+
+	/**
 	 * @read_edid:
 	 *
 	 * This callback is used by the framework as a replacement for reading
@@ -1438,6 +1540,128 @@ struct drm_connector_hdmi_funcs {
 	 * Valid EDID on success, NULL in case of failure.
 	 */
 	const struct drm_edid *(*read_edid)(struct drm_connector *connector);
+
+	/**
+	 * @scrambler_enable:
+	 *
+	 * The callback is invoked via @drm_connector_hdmi_enable_scrambling
+	 * during commit to setup SCDC scrambling and high TMDS clock ratio on
+	 * the source side.
+	 *
+	 * The @scrambler_enable callback is mandatory if HDMI 2.0 is to be
+	 * supported.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise
+	 */
+	int (*scrambler_enable)(struct drm_connector *connector);
+
+	/**
+	 * @scrambler_disable:
+	 *
+	 * The callback is invoked via @drm_connector_hdmi_disable_scrambling
+	 * during commit to tear down SCDC scrambling and high TMDS clock ratio
+	 * on the source side.
+	 *
+	 * The @scrambler_disable callback is mandatory if HDMI 2.0 is to be
+	 * supported.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise
+	 */
+	int (*scrambler_disable)(struct drm_connector *connector);
+
+	/**
+	 * @frl_configure:
+	 *
+	 * This callback is invoked by the FRL helpers to configure the source
+	 * PHY for a given FRL operating point.
+	 *
+	 * The @frl_configure callback is mandatory if HDMI 2.1 FRL is to be
+	 * supported.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise.
+	 */
+	int (*frl_configure)(struct drm_connector *connector,
+			     u8 rate_per_lane, u8 lanes);
+
+	/**
+	 * @frl_set_ltp:
+	 *
+	 * This callback is invoked by the FRL helpers to apply the per-lane
+	 * Link Training Pattern (LTP) requested by the sink.
+	 *
+	 * The @frl_set_ltp callback is mandatory if HDMI 2.1 FRL is to be
+	 * supported.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise.
+	 */
+	int (*frl_set_ltp)(struct drm_connector *connector,
+			   u8 ln0, u8 ln1, u8 ln2, u8 ln3);
+
+	/**
+	 * @frl_tx_start:
+	 *
+	 * This callback is invoked by the FRL helpers to un-mute the bridge's
+	 * video pipeline and resume normal packet transmission.
+	 *
+	 * The @frl_tx_start callback is mandatory if HDMI 2.1 FRL is to be
+	 * supported.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise.
+	 */
+	int (*frl_tx_start)(struct drm_connector *connector);
+
+	/**
+	 * @frl_tx_stop:
+	 *
+	 * This callback is invoked by the FRL helpers to quiesce the bridge's
+	 * video pipeline so that link training can run undisturbed.
+	 *
+	 * The @frl_tx_stop callback is mandatory if HDMI 2.1 FRL is to be
+	 * supported.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise.
+	 */
+	int (*frl_tx_stop)(struct drm_connector *connector);
+
+	/**
+	 * @frl_fallback_tmds:
+	 *
+	 * This callback is invoked by the FRL helpers when FRL is not supported
+	 * by the sink, not required for the current mode, or when FRL link
+	 * training has failed so that the link operation mode falls back to
+	 * TMDS.
+	 *
+	 * The @frl_fallback_tmds callback is mandatory if HDMI 2.1 FRL is to
+	 * be supported.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise.
+	 */
+	int (*frl_fallback_tmds)(struct drm_connector *connector);
+
+	/**
+	 * @frl_set_ffe_level:
+	 *
+	 * Optional callback invoked by the FRL link training helper from
+	 * LTS:3 when the sink requests a TxFFE (Transmitter Feed-Forward
+	 * Equalization) level increase on one or more lanes. The helper
+	 * increments the level incrementally up to
+	 * &drm_connector_hdmi.max_ffe_level before giving up.
+	 *
+	 * Bridges that do not implement this callback will cause the helper
+	 * to fall back to LTS:L (legacy TMDS) on any FFE level update
+	 * request from the sink.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise.
+	 */
+	int (*frl_set_ffe_level)(struct drm_connector *connector, u8 ffe_level);
 
 	/**
 	 * @avi:
@@ -1560,6 +1784,12 @@ struct drm_connector_funcs {
 	 * connector is forced to a certain state by userspace, either through
 	 * the sysfs interfaces or on the kernel cmdline. In that case the
 	 * @detect callback isn't called.
+	 *
+	 * New drivers should implement
+	 * &drm_connector_helper_funcs.force_ctx instead, which gets passed
+	 * the modeset acquire context and thus allows taking additional
+	 * locks.  It takes precedence over this callback when both are
+	 * implemented.
 	 *
 	 * FIXME:
 	 *
@@ -2033,26 +2263,131 @@ struct drm_connector_hdmi_audio {
  * struct drm_connector_hdmi - DRM Connector HDMI-related structure
  */
 struct drm_connector_hdmi {
-#define DRM_CONNECTOR_HDMI_VENDOR_LEN	8
 	/**
-	 * @vendor: HDMI Controller Vendor Name
-	 */
-	unsigned char vendor[DRM_CONNECTOR_HDMI_VENDOR_LEN] __nonstring;
-
-#define DRM_CONNECTOR_HDMI_PRODUCT_LEN	16
-	/**
-	 * @product: HDMI Controller Product Name
-	 */
-	unsigned char product[DRM_CONNECTOR_HDMI_PRODUCT_LEN] __nonstring;
-
-	/**
-	 * @supported_formats: Bitmask of @drm_output_color_format
+	 * @max_tmds_char_rate: Maximum TMDS character rate, in Hz,
 	 * supported by the controller.
+	 *
+	 * This is inferred from &drm_connector_hdmi_funcs.supported_hdmi_ver,
+	 * by default. However, controllers may support a lower rate than that
+	 * specification version would imply. If that is the case, drivers are
+	 * expected to set &drm_connector_hdmi_funcs.supported_tmds_char_rate
+	 * to a non-zero value indicating the actual limit.
 	 */
-	unsigned long supported_formats;
+	unsigned long long max_tmds_char_rate;
 
 	/**
-	 * @funcs: HDMI connector Control Functions
+	 * @scrambler_enabled: Tracks whether HDMI 2.0 scrambler is currently enabled.
+	 */
+	bool scrambler_enabled;
+
+	/**
+	 * @frl_enabled: Tracks whether HDMI 2.1 FRL is currently enabled.
+	 */
+	bool frl_enabled;
+
+	/**
+	 * @min_frl_rate_per_lane: Minimum FRL rate per lane, in Gbps,
+	 * supported by the controller.
+	 *
+	 * This is inferred from &drm_connector_hdmi_funcs.supported_hdmi_ver,
+	 * by default. However, controllers may only support a higher rate than
+	 * that specification version would imply. If that is the case, drivers
+	 * are expected to set it to a non-zero value indicating the actual
+	 * limit.
+	 */
+	u8 min_frl_rate_per_lane;
+
+	/**
+	 * @min_frl_lanes: Minimum FRL lane count supported by the controller.
+	 *
+	 * This is inferred from &drm_connector_hdmi_funcs.supported_hdmi_ver,
+	 * by default. However, controllers may only support a higher lane count
+	 * that specification version would imply. If that is the case, drivers
+	 * are expected to set it to a non-zero value indicating the actual
+	 * limit.
+	 */
+	u8 min_frl_lanes;
+
+	/**
+	 * @max_frl_rate_per_lane: Maximum FRL rate per lane, in Gbps,
+	 * supported by the controller.
+	 *
+	 * This is inferred from &drm_connector_hdmi_funcs.supported_hdmi_ver,
+	 * by default. However, controllers may only support a lower rate than
+	 * that specification version would imply. If that is the case, drivers
+	 * are expected to set it to a non-zero value indicating the actual
+	 * limit.
+	 */
+	u8 max_frl_rate_per_lane;
+
+	/**
+	 * @max_frl_lanes: Maximum FRL lane count supported by the controller.
+	 *
+	 * This is inferred from &drm_connector_hdmi_funcs.supported_hdmi_ver,
+	 * by default. However, controllers may only support a lower lane count
+	 * that specification version would imply. If that is the case, drivers
+	 * are expected to set it to a non-zero value indicating the actual
+	 * limit.
+	 */
+	u8 max_frl_lanes;
+
+	/**
+	 * @max_ffe_level: Maximum TxFFE (Transmitter Feed-Forward Equalization)
+	 * level supported by the source for the advertised FRL rate.
+	 *
+	 * Valid range is 0..3, as defined by HDMI 2.1 spec. Only meaningful
+	 * when drm_connector_hdmi_frl_supported() returns true.
+	 */
+	u8 max_ffe_level;
+
+	/**
+	 * @scdc_work: Work item that has a dual role, depending on the
+	 * link operating mode.
+	 *
+	 * For HDMI 2.0 (TMDS), it is used to monitor sink-side scrambling
+	 * status and retry setup if the sink resets it.
+	 *
+	 * For HDMI 2.1 (FRL), it runs the SCDC link training (FLT) state
+	 * machine.
+	 */
+	struct delayed_work scdc_work;
+
+	/**
+	 * @scdc_work_initialized: Tracks whether @scdc_work has been set up via
+	 * INIT_DELAYED_WORK().
+	 *
+	 * The work item is expected to be initialized lazily on the first
+	 * usage, depending on the link operating mode: for HDMI 2.0, to be
+	 * done on scrambling enable; while for HDMI 2.1, on FRL enable.
+	 *
+	 * Hence this guards the teardown paths against touching an
+	 * uninitialized work item.
+	 */
+	bool scdc_work_initialized;
+
+	/**
+	 * @scdc_work_data: Data for @scdc_work exclusive usage.
+	 */
+	struct {
+		/**
+		 * @frl_rate_per_lane: Current FRL bit rate, in Gbps.
+		 */
+		u8 frl_rate_per_lane;
+
+		/**
+		 * @frl_lanes: Current number of FRL lanes.
+		 */
+		u8 frl_lanes;
+
+		/**
+		 * @flt_no_timeout: Tracks whether the sink has placed the link
+		 * into FLT no-timeout test mode (see SCDC_FLT_NO_TIMEOUT).
+		 */
+		bool flt_no_timeout;
+	} scdc_work_data;
+
+	/**
+	 * @funcs: HDMI connector Control Functions and controller capabilities
 	 */
 	const struct drm_connector_hdmi_funcs *funcs;
 
@@ -2285,11 +2620,6 @@ struct drm_connector {
 	 * be updated by calling drm_connector_set_path_property().
 	 */
 	struct drm_property_blob *path_blob_ptr;
-
-	/**
-	 * @max_bpc: Maximum bits per color channel the connector supports.
-	 */
-	unsigned int max_bpc;
 
 	/**
 	 * @max_bpc_property: Default connector property for the max bpc to be
@@ -2551,13 +2881,10 @@ int drmm_connector_init(struct drm_device *dev,
 			struct i2c_adapter *ddc);
 int drmm_connector_hdmi_init(struct drm_device *dev,
 			     struct drm_connector *connector,
-			     const char *vendor, const char *product,
 			     const struct drm_connector_funcs *funcs,
 			     const struct drm_connector_hdmi_funcs *hdmi_funcs,
 			     int connector_type,
-			     struct i2c_adapter *ddc,
-			     unsigned long supported_formats,
-			     unsigned int max_bpc);
+			     struct i2c_adapter *ddc);
 void drm_connector_attach_edid_property(struct drm_connector *connector);
 int drm_connector_register(struct drm_connector *connector);
 int drm_connector_dynamic_register(struct drm_connector *connector);
@@ -2634,6 +2961,41 @@ drm_connector_is_unregistered(struct drm_connector *connector)
 {
 	return READ_ONCE(connector->registration_state) ==
 		DRM_CONNECTOR_UNREGISTERED;
+}
+
+/**
+ * drm_connector_hdmi_scrambler_supported - does connector support HDMI
+ * scrambling?
+ * @connector: DRM connector
+ *
+ * Checks whether or not @connector driver supports HDMI scrambling, based on
+ * the HDMI version advertised by the controller.
+ *
+ * Returns:
+ * True if the connector supports scrambling, false otherwise.
+ */
+static inline bool
+drm_connector_hdmi_scrambler_supported(const struct drm_connector *connector)
+{
+	return connector->hdmi.funcs &&
+		connector->hdmi.funcs->supported_hdmi_ver >= HDMI_VERSION_2_0;
+}
+
+/**
+ * drm_connector_hdmi_frl_supported - does connector support HDMI 2.1 FRL?
+ * @connector: DRM connector
+ *
+ * Checks whether or not @connector driver supports HDMI 2.1 Fixed Rate Link
+ * (FRL), based on the HDMI version advertised by the controller.
+ *
+ * Returns:
+ * True if the connector supports FRL, false otherwise.
+ */
+static inline bool
+drm_connector_hdmi_frl_supported(const struct drm_connector *connector)
+{
+	return connector->hdmi.funcs &&
+		connector->hdmi.funcs->supported_hdmi_ver >= HDMI_VERSION_2_1;
 }
 
 void drm_connector_oob_hotplug_event(struct fwnode_handle *connector_fwnode,

@@ -17,6 +17,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/of_graph.h>
 #include <linux/of_irq.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
@@ -114,6 +115,8 @@ struct rockchip_chg_det_reg {
 /**
  * struct rockchip_usb2phy_port_cfg - usb-phy port configuration.
  * @phy_sus: phy suspend register.
+ * @svbus_en: soft vbus bvalid enable register.
+ * @svbus_sel: soft vbus bvalid selection register.
  * @bvalid_det_en: vbus valid rise detection enable register.
  * @bvalid_det_st: vbus valid rise detection status register.
  * @bvalid_det_clr: vbus valid rise detection clear register.
@@ -140,6 +143,8 @@ struct rockchip_chg_det_reg {
  */
 struct rockchip_usb2phy_port_cfg {
 	struct usb2phy_reg	phy_sus;
+	struct usb2phy_reg	svbus_en;
+	struct usb2phy_reg	svbus_sel;
 	struct usb2phy_reg	bvalid_det_en;
 	struct usb2phy_reg	bvalid_det_st;
 	struct usb2phy_reg	bvalid_det_clr;
@@ -205,6 +210,7 @@ struct rockchip_usb2phy_cfg {
  * @event_nb: hold event notification callback.
  * @state: define OTG enumeration states before device reset.
  * @mode: the dr_mode of the controller.
+ * @typec_vbus_det: whether to apply Type C logic to OTG vbus detection.
  */
 struct rockchip_usb2phy_port {
 	struct phy	*phy;
@@ -224,6 +230,7 @@ struct rockchip_usb2phy_port {
 	struct notifier_block	event_nb;
 	enum usb_otg_state	state;
 	enum usb_dr_mode	mode;
+	bool typec_vbus_det;
 };
 
 /**
@@ -332,8 +339,39 @@ rockchip_usb2phy_clk480m_clkout_ctl(struct clk_hw *hw, struct regmap **base,
 	}
 }
 
+static int rockchip_usb2phy_set_suspend(struct rockchip_usb2phy *rphy,
+					struct rockchip_usb2phy_port *rport,
+					bool do_suspend)
+{
+	int ret;
+
+	ret = property_enable(rphy->grf, &rport->port_cfg->phy_sus, do_suspend);
+	if (ret)
+		return ret;
+
+	if (!do_suspend) {
+		/*
+		 * For rk3588, it needs to reset phy when exit from suspend
+		 * mode with common_on_n 1'b1(aka REFCLK_LOGIC, Bias, and PLL
+		 * blocks are powered down) for lower power consumption. If you
+		 * don't want to reset phy, please keep the common_on_n 1'b0 to
+		 * set these blocks remain powered.
+		 */
+		ret = rockchip_usb2phy_reset(rphy);
+		if (ret)
+			return ret;
+
+		/* waiting for the utmi_clk to become stable */
+		usleep_range(1500, 2000);
+	}
+
+	return 0;
+}
+
 static int rockchip_usb2phy_clk480m_prepare(struct clk_hw *hw)
 {
+	struct rockchip_usb2phy *rphy =
+		container_of(hw, struct rockchip_usb2phy, clk480m_hw);
 	const struct usb2phy_reg *clkout_ctl;
 	struct regmap *base;
 	int ret;
@@ -350,15 +388,26 @@ static int rockchip_usb2phy_clk480m_prepare(struct clk_hw *hw)
 		usleep_range(1200, 1300);
 	}
 
+	if (rphy->phy_cfg->num_ports == 1) {
+		ret = rockchip_usb2phy_set_suspend(rphy, &rphy->ports[0], false);
+		if (ret)
+			return ret;
+	}
+
 	return 0;
 }
 
 static void rockchip_usb2phy_clk480m_unprepare(struct clk_hw *hw)
 {
+	struct rockchip_usb2phy *rphy =
+		container_of(hw, struct rockchip_usb2phy, clk480m_hw);
 	const struct usb2phy_reg *clkout_ctl;
 	struct regmap *base;
 
 	rockchip_usb2phy_clk480m_clkout_ctl(hw, &base, &clkout_ctl);
+
+	if (rphy->phy_cfg->num_ports == 1)
+		rockchip_usb2phy_set_suspend(rphy, &rphy->ports[0], true);
 
 	/* turn off 480m clk output */
 	property_enable(base, clkout_ctl, false);
@@ -508,9 +557,18 @@ static int rockchip_usb2phy_init(struct phy *phy)
 	struct rockchip_usb2phy *rphy = dev_get_drvdata(phy->dev.parent);
 	int ret = 0;
 
+	dev_dbg(&phy->dev, "phy port init\n");
+
 	mutex_lock(&rport->mutex);
 
 	if (rport->port_id == USB2PHY_PORT_OTG) {
+		if (rport->typec_vbus_det) {
+			if (rport->port_cfg->svbus_en.enable &&
+					rport->port_cfg->svbus_sel.enable) {
+				property_enable(rphy->grf, &rport->port_cfg->svbus_en, true);
+				property_enable(rphy->grf, &rport->port_cfg->svbus_sel, true);
+			}
+		}
 		if (rport->mode != USB_DR_MODE_HOST &&
 		    rport->mode != USB_DR_MODE_UNKNOWN) {
 			/* clear bvalid status and enable bvalid detect irq */
@@ -551,8 +609,7 @@ static int rockchip_usb2phy_init(struct phy *phy)
 			if (ret)
 				goto out;
 
-			schedule_delayed_work(&rport->otg_sm_work,
-					      OTG_SCHEDULE_DELAY * 3);
+			schedule_delayed_work(&rport->otg_sm_work, 0);
 		} else {
 			/* If OTG works in host only mode, do nothing. */
 			dev_dbg(&rport->phy->dev, "mode %d\n", rport->mode);
@@ -592,7 +649,7 @@ static int rockchip_usb2phy_power_on(struct phy *phy)
 	struct rockchip_usb2phy *rphy = dev_get_drvdata(phy->dev.parent);
 	int ret;
 
-	dev_dbg(&rport->phy->dev, "port power on\n");
+	dev_dbg(&phy->dev, "port power on\n");
 
 	if (!rport->suspended)
 		return 0;
@@ -601,26 +658,13 @@ static int rockchip_usb2phy_power_on(struct phy *phy)
 	if (ret)
 		return ret;
 
-	ret = property_enable(rphy->grf, &rport->port_cfg->phy_sus, false);
-	if (ret) {
-		clk_disable_unprepare(rphy->clk480m);
-		return ret;
+	if (rphy->phy_cfg->num_ports > 1) {
+		ret = rockchip_usb2phy_set_suspend(rphy, rport, false);
+		if (ret) {
+			clk_disable_unprepare(rphy->clk480m);
+			return ret;
+		}
 	}
-
-	/*
-	 * For rk3588, it needs to reset phy when exit from
-	 * suspend mode with common_on_n 1'b1(aka REFCLK_LOGIC,
-	 * Bias, and PLL blocks are powered down) for lower
-	 * power consumption. If you don't want to reset phy,
-	 * please keep the common_on_n 1'b0 to set these blocks
-	 * remain powered.
-	 */
-	ret = rockchip_usb2phy_reset(rphy);
-	if (ret)
-		return ret;
-
-	/* waiting for the utmi_clk to become stable */
-	usleep_range(1500, 2000);
 
 	rport->suspended = false;
 	return 0;
@@ -632,14 +676,16 @@ static int rockchip_usb2phy_power_off(struct phy *phy)
 	struct rockchip_usb2phy *rphy = dev_get_drvdata(phy->dev.parent);
 	int ret;
 
-	dev_dbg(&rport->phy->dev, "port power off\n");
+	dev_dbg(&phy->dev, "port power off\n");
 
 	if (rport->suspended)
 		return 0;
 
-	ret = property_enable(rphy->grf, &rport->port_cfg->phy_sus, true);
-	if (ret)
-		return ret;
+	if (rphy->phy_cfg->num_ports > 1) {
+		ret = rockchip_usb2phy_set_suspend(rphy, rport, true);
+		if (ret)
+			return ret;
+	}
 
 	rport->suspended = true;
 	clk_disable_unprepare(rphy->clk480m);
@@ -650,6 +696,8 @@ static int rockchip_usb2phy_power_off(struct phy *phy)
 static int rockchip_usb2phy_exit(struct phy *phy)
 {
 	struct rockchip_usb2phy_port *rport = phy_get_drvdata(phy);
+
+	dev_dbg(&phy->dev, "phy port exit\n");
 
 	if (rport->port_id == USB2PHY_PORT_OTG &&
 	    rport->mode != USB_DR_MODE_HOST &&
@@ -680,8 +728,17 @@ static void rockchip_usb2phy_otg_sm_work(struct work_struct *work)
 	unsigned long delay;
 	bool vbus_attach, sch_work, notify_charger;
 
-	vbus_attach = property_enabled(rphy->grf,
-				       &rport->port_cfg->utmi_bvalid);
+	if (rport->port_cfg->svbus_en.enable && rport->typec_vbus_det) {
+		if (property_enabled(rphy->grf, &rport->port_cfg->svbus_en) &&
+		    property_enabled(rphy->grf, &rport->port_cfg->svbus_sel)) {
+			vbus_attach = true;
+		} else {
+			vbus_attach = false;
+		}
+	} else {
+		vbus_attach = property_enabled(rphy->grf,
+					       &rport->port_cfg->utmi_bvalid);
+	}
 
 	sch_work = false;
 	notify_charger = false;
@@ -990,7 +1047,6 @@ static void rockchip_usb2phy_sm_work(struct work_struct *work)
 		if (rport->suspended) {
 			dev_dbg(&rport->phy->dev, "Connected\n");
 			rockchip_usb2phy_power_on(rport->phy);
-			rport->suspended = false;
 		} else {
 			/* D+ line pull-up, D- line pull-down */
 			dev_dbg(&rport->phy->dev, "FS/LS online\n");
@@ -1000,7 +1056,6 @@ static void rockchip_usb2phy_sm_work(struct work_struct *work)
 		if (!rport->suspended) {
 			dev_dbg(&rport->phy->dev, "Disconnected\n");
 			rockchip_usb2phy_power_off(rport->phy);
-			rport->suspended = true;
 		}
 
 		/*
@@ -1287,6 +1342,83 @@ static int rockchip_otg_event(struct notifier_block *nb,
 	return NOTIFY_DONE;
 }
 
+static const char *const rockchip_usb2phy_typec_cons[] = {
+	"usb-c-connector",
+	NULL,
+};
+
+static struct device_node *rockchip_usb2phy_to_controller(struct rockchip_usb2phy *rphy)
+{
+	struct device_node *np;
+	struct device_node *parent;
+
+	for_each_node_with_property(np, "phys") {
+		struct of_phandle_iterator it;
+		int ret;
+
+		of_for_each_phandle(&it, ret, np, "phys", NULL, 0) {
+			parent = of_get_parent(it.node);
+			if (it.node != rphy->dev->of_node && rphy->dev->of_node != parent) {
+				if (parent)
+					of_node_put(parent);
+				continue;
+			}
+
+			/*
+			 * Either the PHY phandle we're iterating or its parent
+			 * matched, we don't care about which out of the two in
+			 * particular as we just need to know it's the right
+			 * USB controller for this PHY.
+			 */
+			of_node_put(it.node);
+			of_node_put(parent);
+			return np;
+		}
+	}
+
+	return NULL;
+}
+
+static bool rockchip_usb2phy_otg_is_type_c(struct rockchip_usb2phy *rphy)
+{
+	struct device_node *controller = rockchip_usb2phy_to_controller(rphy);
+	struct device_node *ports;
+	struct device_node *ep = NULL;
+	struct device_node *parent;
+
+	if (!controller)
+		return false;
+
+	ports = of_get_child_by_name(controller, "ports");
+	if (ports) {
+		of_node_put(controller);
+		controller = ports;
+	}
+
+	for_each_of_graph_port(controller, port) {
+		ep = of_get_child_by_name(port, "endpoint");
+		if (!ep)
+			continue;
+
+		parent = of_graph_get_remote_port_parent(ep);
+		of_node_put(ep);
+		if (!parent)
+			continue;
+
+		if (of_device_compatible_match(parent, rockchip_usb2phy_typec_cons)) {
+			of_node_put(parent);
+			of_node_put(controller);
+			return true;
+		}
+
+		of_node_put(parent);
+	}
+
+	of_node_put(controller);
+
+	return false;
+}
+
 static int rockchip_usb2phy_otg_port_init(struct rockchip_usb2phy *rphy,
 					  struct rockchip_usb2phy_port *rport,
 					  struct device_node *child_np)
@@ -1307,6 +1439,8 @@ static int rockchip_usb2phy_otg_port_init(struct rockchip_usb2phy *rphy,
 	rport->vbus_attached = false;
 
 	mutex_init(&rport->mutex);
+
+	rport->typec_vbus_det = rockchip_usb2phy_otg_is_type_c(rphy);
 
 	rport->mode = of_usb_get_dr_mode_by_phy(child_np, -1);
 	if (rport->mode == USB_DR_MODE_HOST ||
@@ -2135,6 +2269,8 @@ static const struct rockchip_usb2phy_cfg rk3576_phy_cfgs[] = {
 		.port_cfgs	= {
 			[USB2PHY_PORT_OTG] = {
 				.phy_sus	= { 0x0000, 8, 0, 0, 0x1d1 },
+				.svbus_en	= { 0x0000, 15, 15, 0, 1 },
+				.svbus_sel	= { 0x0000, 14, 14, 0, 1 },
 				.bvalid_det_en	= { 0x00c0, 1, 1, 0, 1 },
 				.bvalid_det_st	= { 0x00c4, 1, 1, 0, 1 },
 				.bvalid_det_clr = { 0x00c8, 1, 1, 0, 1 },
@@ -2172,6 +2308,8 @@ static const struct rockchip_usb2phy_cfg rk3576_phy_cfgs[] = {
 		.port_cfgs	= {
 			[USB2PHY_PORT_OTG] = {
 				.phy_sus	= { 0x2000, 8, 0, 0, 0x1d1 },
+				.svbus_en	= { 0x2000, 15, 15, 0, 1 },
+				.svbus_sel	= { 0x2000, 14, 14, 0, 1 },
 				.bvalid_det_en	= { 0x20c0, 1, 1, 0, 1 },
 				.bvalid_det_st	= { 0x20c4, 1, 1, 0, 1 },
 				.bvalid_det_clr = { 0x20c8, 1, 1, 0, 1 },

@@ -33,6 +33,7 @@
 #include <drm/drm_sysfs.h>
 #include <drm/drm_utils.h>
 
+#include <linux/cleanup.h>
 #include <linux/export.h>
 #include <linux/platform_device.h>
 #include <linux/property.h>
@@ -81,6 +82,22 @@
 static DEFINE_MUTEX(connector_list_lock);
 static LIST_HEAD(connector_list);
 
+/*
+ * List of connector fwnodes with their last out-of-band hotplug status
+ * required to forward them to a connector on registration. This ensures
+ * the connector sees a HPD event, if the event arrived before the DRM
+ * driver was probed (either due to module reload, or because of bad
+ * timing during bootup).
+ */
+struct drm_oob_hotplug_state {
+	struct list_head head;
+	struct fwnode_handle *fwnode;
+	enum drm_connector_status status;
+};
+
+static DEFINE_MUTEX(oob_hotplug_list_lock);
+static LIST_HEAD(oob_hotplug_list);
+
 struct drm_conn_prop_enum_list {
 	int type;
 	const char *name;
@@ -128,6 +145,19 @@ void drm_connector_ida_destroy(void)
 
 	for (i = 0; i < ARRAY_SIZE(drm_connector_enum_list); i++)
 		ida_destroy(&drm_connector_enum_list[i].ida);
+}
+
+void drm_connector_oob_hotplug_cleanup(void)
+{
+	struct drm_oob_hotplug_state *e, *tmp;
+
+	scoped_guard(mutex, &oob_hotplug_list_lock) {
+		list_for_each_entry_safe(e, tmp, &oob_hotplug_list, head) {
+			list_del(&e->head);
+			fwnode_handle_put(e->fwnode);
+			kfree(e);
+		}
+	}
 }
 
 /**
@@ -546,14 +576,10 @@ EXPORT_SYMBOL(drmm_connector_init);
  * drmm_connector_hdmi_init - Init a preallocated HDMI connector
  * @dev: DRM device
  * @connector: A pointer to the HDMI connector to init
- * @vendor: HDMI Controller Vendor name
- * @product: HDMI Controller Product name
  * @funcs: callbacks for this connector
- * @hdmi_funcs: HDMI-related callbacks for this connector
+ * @hdmi_funcs: HDMI-related callbacks and capabilities for this connector
  * @connector_type: user visible type of the connector
  * @ddc: optional pointer to the associated ddc adapter
- * @supported_formats: Bitmask of @drm_output_color_format listing supported output formats
- * @max_bpc: Maximum bits per char the HDMI connector supports
  *
  * Initialises a preallocated HDMI connector. Connectors can be
  * subclassed as part of driver connector objects.
@@ -570,34 +596,34 @@ EXPORT_SYMBOL(drmm_connector_init);
  */
 int drmm_connector_hdmi_init(struct drm_device *dev,
 			     struct drm_connector *connector,
-			     const char *vendor, const char *product,
 			     const struct drm_connector_funcs *funcs,
 			     const struct drm_connector_hdmi_funcs *hdmi_funcs,
 			     int connector_type,
-			     struct i2c_adapter *ddc,
-			     unsigned long supported_formats,
-			     unsigned int max_bpc)
+			     struct i2c_adapter *ddc)
 {
 	int ret;
 
-	if (!vendor || !product)
+	if (!hdmi_funcs)
 		return -EINVAL;
 
-	if ((strlen(vendor) > DRM_CONNECTOR_HDMI_VENDOR_LEN) ||
-	    (strlen(product) > DRM_CONNECTOR_HDMI_PRODUCT_LEN))
+	if (!hdmi_funcs->vendor || !hdmi_funcs->product)
 		return -EINVAL;
 
-	if (!(connector_type == DRM_MODE_CONNECTOR_HDMIA ||
-	      connector_type == DRM_MODE_CONNECTOR_HDMIB))
+	if ((strlen(hdmi_funcs->vendor) > HDMI_SPD_INFOFRAME_VENDOR_LEN) ||
+	    (strlen(hdmi_funcs->product) > HDMI_SPD_INFOFRAME_PRODUCT_LEN))
 		return -EINVAL;
 
-	if (!supported_formats || !(supported_formats & BIT(DRM_OUTPUT_COLOR_FORMAT_RGB444)))
+	if (!hdmi_funcs->supported_formats ||
+	    !(hdmi_funcs->supported_formats & BIT(DRM_OUTPUT_COLOR_FORMAT_RGB444)))
 		return -EINVAL;
 
-	if (connector->ycbcr_420_allowed != !!(supported_formats & BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR420)))
+	if (connector->ycbcr_420_allowed !=
+	    !!(hdmi_funcs->supported_formats & BIT(DRM_OUTPUT_COLOR_FORMAT_YCBCR420)))
 		return -EINVAL;
 
-	if (!(max_bpc == 8 || max_bpc == 10 || max_bpc == 12))
+	if (!(hdmi_funcs->max_bpc == 8 ||
+	      hdmi_funcs->max_bpc == 10 ||
+	      hdmi_funcs->max_bpc == 12))
 		return -EINVAL;
 
 	if (!hdmi_funcs->avi.clear_infoframe ||
@@ -606,13 +632,93 @@ int drmm_connector_hdmi_init(struct drm_device *dev,
 	    !hdmi_funcs->hdmi.write_infoframe)
 		return -EINVAL;
 
+	if (hdmi_funcs->supported_hdmi_ver >= HDMI_VERSION_2_0 &&
+	    (!hdmi_funcs->scrambler_enable ||
+	     !hdmi_funcs->scrambler_disable)) {
+		drm_err(dev, "Scrambler callbacks missing for HDMI 2.x\n");
+		return -EINVAL;
+	}
+
+	if (hdmi_funcs->supported_hdmi_ver >= HDMI_VERSION_2_1 &&
+	    (!hdmi_funcs->frl_configure ||
+	     !hdmi_funcs->frl_set_ltp ||
+	     !hdmi_funcs->frl_tx_start ||
+	     !hdmi_funcs->frl_tx_stop ||
+	     !hdmi_funcs->frl_fallback_tmds)) {
+		drm_err(dev, "FRL callbacks missing for HDMI 2.1+\n");
+		return -EINVAL;
+	}
+
+	if (!(connector_type == DRM_MODE_CONNECTOR_HDMIA ||
+	      connector_type == DRM_MODE_CONNECTOR_HDMIB))
+		return -EINVAL;
+
 	ret = drmm_connector_init(dev, connector, funcs, connector_type, ddc);
 	if (ret)
 		return ret;
 
-	connector->hdmi.supported_formats = supported_formats;
-	strtomem_pad(connector->hdmi.vendor, vendor, 0);
-	strtomem_pad(connector->hdmi.product, product, 0);
+	if (hdmi_funcs->supported_hdmi_ver >= HDMI_VERSION_2_1) {
+		if (!connector->hdmi.min_frl_rate_per_lane)
+			connector->hdmi.min_frl_rate_per_lane = HDMI_2_1_FRL_LANE_RATE_MIN_GBPS;
+		if (!connector->hdmi.max_frl_rate_per_lane)
+			connector->hdmi.max_frl_rate_per_lane =
+				hdmi_frl_get_max_lane_rate_gbps(hdmi_funcs->supported_hdmi_ver);
+		if (!connector->hdmi.min_frl_lanes)
+			connector->hdmi.min_frl_lanes = HDMI_2_1_FRL_LANE_COUNT_MIN;
+		if (!connector->hdmi.max_frl_lanes)
+			connector->hdmi.max_frl_lanes =
+				hdmi_frl_get_max_lane_count(hdmi_funcs->supported_hdmi_ver);
+
+		if (connector->hdmi.max_frl_rate_per_lane < connector->hdmi.min_frl_rate_per_lane ||
+		    connector->hdmi.max_frl_lanes < connector->hdmi.min_frl_lanes ||
+		    !hdmi_is_valid_frl_config(connector->hdmi.min_frl_rate_per_lane,
+					      connector->hdmi.min_frl_lanes) ||
+		    !hdmi_is_valid_frl_config(connector->hdmi.max_frl_rate_per_lane,
+					      connector->hdmi.max_frl_lanes) ||
+		    (hdmi_frl_get_max_lane_rate_gbps(hdmi_funcs->supported_hdmi_ver) <
+				connector->hdmi.max_frl_rate_per_lane) ||
+		    (hdmi_frl_get_max_lane_count(hdmi_funcs->supported_hdmi_ver) <
+				connector->hdmi.max_frl_lanes)) {
+			drm_err(dev, "Invalid FRL rate/lane limits\n");
+			return -EINVAL;
+		}
+
+		if (!!connector->hdmi.max_ffe_level != !!hdmi_funcs->frl_set_ffe_level) {
+			drm_err(dev, "Invalid FFE level config\n");
+			return -EINVAL;
+		}
+
+		if (connector->hdmi.max_ffe_level > HDMI_2_1_FRL_FFE_LEVEL_MAX) {
+			drm_err(dev, "Invalid FFE level limit\n");
+			return -EINVAL;
+		}
+	}
+
+	/*
+	 * The supported HDMI version can be used to determinate the maximum
+	 * TMDS character rate allowed by the specification. Some controllers,
+	 * however, may support a lower rate than that version would imply.
+	 *
+	 * A non-zero caps->max_tmds_char_rate lets drivers override this
+	 * default with the actual controller capability. A value of zero keeps
+	 * the limit inferred from supported_hdmi_ver.
+	 */
+	if (hdmi_funcs->supported_hdmi_ver >= HDMI_VERSION_2_0)
+		connector->hdmi.max_tmds_char_rate = HDMI_2_0_TMDS_CHAR_RATE_MAX_HZ;
+	else if (hdmi_funcs->supported_hdmi_ver >= HDMI_VERSION_1_3)
+		connector->hdmi.max_tmds_char_rate = HDMI_1_3_TMDS_CHAR_RATE_MAX_HZ;
+	else if (hdmi_funcs->supported_hdmi_ver >= HDMI_VERSION_1_0)
+		connector->hdmi.max_tmds_char_rate = HDMI_1_0_TMDS_CHAR_RATE_MAX_HZ;
+
+	if (hdmi_funcs->supported_tmds_char_rate) {
+		if (hdmi_funcs->supported_tmds_char_rate > connector->hdmi.max_tmds_char_rate) {
+			drm_err(dev, "Enforced max_tmds_char_rate exceeds %llu spec limit\n",
+				connector->hdmi.max_tmds_char_rate);
+			return -EINVAL;
+		}
+
+		connector->hdmi.max_tmds_char_rate = hdmi_funcs->supported_tmds_char_rate;
+	}
 
 	/*
 	 * drm_connector_attach_max_bpc_property() requires the
@@ -628,15 +734,17 @@ int drmm_connector_hdmi_init(struct drm_device *dev,
 		connector->state = state;
 	} else if (connector->funcs->reset) {
 		connector->funcs->reset(connector);
+		if (!connector->state)
+			return -ENOMEM;
 	}
 
-	drm_connector_attach_max_bpc_property(connector, 8, max_bpc);
-	connector->max_bpc = max_bpc;
+	drm_connector_attach_max_bpc_property(connector, 8, hdmi_funcs->max_bpc);
 
-	if (max_bpc > 8)
+	if (hdmi_funcs->max_bpc > 8)
 		drm_connector_attach_hdr_output_metadata_property(connector);
 
-	ret = drm_connector_attach_color_format_property(connector, supported_formats);
+	ret = drm_connector_attach_color_format_property(connector,
+							 hdmi_funcs->supported_formats);
 	if (ret)
 		return ret;
 
@@ -780,6 +888,9 @@ void drm_connector_cleanup(struct drm_connector *connector)
 		    DRM_CONNECTOR_REGISTERED))
 		drm_connector_unregister(connector);
 
+	if (connector->hdmi.scdc_work_initialized)
+		cancel_delayed_work_sync(&connector->hdmi.scdc_work);
+
 	platform_device_unregister(connector->hdmi_audio.codec_pdev);
 
 	if (connector->privacy_screen) {
@@ -830,6 +941,36 @@ void drm_connector_cleanup(struct drm_connector *connector)
 EXPORT_SYMBOL(drm_connector_cleanup);
 
 /**
+ * drm_connector_replay_oob_hotplug_event - send cached OOB HPD event
+ * @connector: the connector that should receive the event
+ *
+ * Send the cached out-of-band hotplug as a new out-of-band hotplug event.
+ */
+static void drm_connector_replay_oob_hotplug_event(struct drm_connector *connector)
+{
+	struct fwnode_handle *fwnode = connector->fwnode;
+	enum drm_connector_status status;
+	struct drm_oob_hotplug_state *e;
+	bool found = false;
+
+	if (!fwnode || !connector->funcs->oob_hotplug_event)
+		return;
+
+	scoped_guard(mutex, &oob_hotplug_list_lock) {
+		list_for_each_entry(e, &oob_hotplug_list, head) {
+			if (e->fwnode == fwnode || fwnode->secondary == e->fwnode) {
+				status = e->status;
+				found = true;
+				break;
+			}
+		}
+	}
+
+	if (found)
+		connector->funcs->oob_hotplug_event(connector, status);
+}
+
+/**
  * drm_connector_register - register a connector
  * @connector: the connector to register
  *
@@ -849,6 +990,7 @@ EXPORT_SYMBOL(drm_connector_cleanup);
  */
 int drm_connector_register(struct drm_connector *connector)
 {
+	bool replay_oob_hotplug = false;
 	int ret = 0;
 
 	if (!connector->dev->registered)
@@ -888,6 +1030,7 @@ int drm_connector_register(struct drm_connector *connector)
 	mutex_lock(&connector_list_lock);
 	list_add_tail(&connector->global_connector_list_entry, &connector_list);
 	mutex_unlock(&connector_list_lock);
+	replay_oob_hotplug = true;
 	goto unlock;
 
 err_late_register:
@@ -898,6 +1041,10 @@ err_debugfs:
 	drm_sysfs_connector_remove(connector);
 unlock:
 	mutex_unlock(&connector->mutex);
+
+	if (replay_oob_hotplug)
+		drm_connector_replay_oob_hotplug_event(connector);
+
 	return ret;
 }
 EXPORT_SYMBOL(drm_connector_register);
@@ -3672,6 +3819,41 @@ struct drm_connector *drm_connector_find_by_fwnode(struct fwnode_handle *fwnode)
 }
 
 /**
+ * drm_connector_record_oob_hotplug_status - Cache OOB hotplug status
+ * @fwnode - fwnode for the DRM connector
+ * @status - out-of-band status info
+ *
+ * Cache the latest out-of-band hotplug status for a fwnode so it can be
+ * (re)played from when the DRM device is (re)registered after this event
+ * arrived.
+ */
+static void drm_connector_record_oob_hotplug_status(struct fwnode_handle *fwnode,
+						    enum drm_connector_status status)
+{
+	struct drm_oob_hotplug_state *e;
+
+	if (!fwnode)
+		return;
+
+	guard(mutex)(&oob_hotplug_list_lock);
+
+	list_for_each_entry(e, &oob_hotplug_list, head) {
+		if (e->fwnode == fwnode) {
+			e->status = status;
+			return;
+		}
+	}
+
+	e = kzalloc(sizeof(*e), GFP_KERNEL);
+	if (!e)
+		return;
+
+	e->fwnode = fwnode_handle_get(fwnode);
+	e->status = status;
+	list_add_tail(&e->head, &oob_hotplug_list);
+}
+
+/**
  * drm_connector_oob_hotplug_event - Report out-of-band hotplug event to connector
  * @connector_fwnode: fwnode_handle to report the event on
  * @status: hot plug detect logical state
@@ -3683,11 +3865,16 @@ struct drm_connector *drm_connector_find_by_fwnode(struct fwnode_handle *fwnode)
  *
  * This function can be used to report these out-of-band events after obtaining
  * a drm_connector reference through calling drm_connector_find_by_fwnode().
+ *
+ * The last status for each fwnode is cached and replayed when a matching DRM
+ * connector device is (re)registered.
  */
 void drm_connector_oob_hotplug_event(struct fwnode_handle *connector_fwnode,
 				     enum drm_connector_status status)
 {
 	struct drm_connector *connector;
+
+	drm_connector_record_oob_hotplug_status(connector_fwnode, status);
 
 	connector = drm_connector_find_by_fwnode(connector_fwnode);
 	if (IS_ERR(connector))

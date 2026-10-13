@@ -19,6 +19,9 @@
 #include <linux/regmap.h>
 #include <linux/reset.h>
 
+/* Common definition */
+#define RK_SRAM_INIT_TIMEOUT_US			20000
+
 /* Register for RK3568 */
 #define GRF_PCIE30PHY_CON1			0x4
 #define GRF_PCIE30PHY_CON6			0x18
@@ -27,6 +30,7 @@
 #define GRF_PCIE30PHY_STATUS0			0x80
 #define GRF_PCIE30PHY_WR_EN			(0xf << 16)
 #define SRAM_INIT_DONE(reg)			(reg & BIT(14))
+
 
 #define RK3568_BIFURCATION_LANE_0_1		BIT(0)
 
@@ -39,7 +43,7 @@
 #define RK3588_PCIE3PHY_GRF_PHY0_LN1_CON1	0x1104
 #define RK3588_PCIE3PHY_GRF_PHY1_LN0_CON1	0x2004
 #define RK3588_PCIE3PHY_GRF_PHY1_LN1_CON1	0x2104
-#define RK3588_SRAM_INIT_DONE(reg)		(reg & BIT(0))
+#define RK3588_SRAM_INIT_DONE(reg)              ((reg & 0xf) == 0xf)
 
 #define RK3588_BIFURCATION_LANE_0_1		BIT(0)
 #define RK3588_BIFURCATION_LANE_2_3		BIT(1)
@@ -71,6 +75,7 @@ struct rockchip_p3phy_priv {
 
 struct rockchip_p3phy_ops {
 	int (*phy_init)(struct rockchip_p3phy_priv *priv);
+	int (*phy_calibrate)(struct rockchip_p3phy_priv *priv);
 };
 
 static int rockchip_p3phy_set_mode(struct phy *phy, enum phy_mode mode, int submode)
@@ -97,8 +102,6 @@ static int rockchip_p3phy_rk3568_init(struct rockchip_p3phy_priv *priv)
 {
 	struct phy *phy = priv->phy;
 	bool bifurcation = false;
-	int ret;
-	u32 reg;
 
 	/* Deassert PCIe PMA output clamp mode */
 	regmap_write(priv->phy_grf, GRF_PCIE30PHY_CON9, GRF_PCIE30PHY_DA_OCM);
@@ -124,25 +127,34 @@ static int rockchip_p3phy_rk3568_init(struct rockchip_p3phy_priv *priv)
 
 	reset_control_deassert(priv->p30phy);
 
+	return 0;
+}
+
+static int rockchip_p3phy_rk3568_calibrate(struct rockchip_p3phy_priv *priv)
+{
+	int ret;
+	u32 reg;
+
 	ret = regmap_read_poll_timeout(priv->phy_grf,
 				       GRF_PCIE30PHY_STATUS0,
 				       reg, SRAM_INIT_DONE(reg),
-				       0, 500);
+				       0, RK_SRAM_INIT_TIMEOUT_US);
 	if (ret)
-		dev_err(&priv->phy->dev, "%s: lock failed 0x%x, check input refclk and power supply\n",
-		       __func__, reg);
+		dev_err(&priv->phy->dev, "lock failed 0x%x, check input refclk and power supply\n",
+			reg);
+
 	return ret;
 }
 
 static const struct rockchip_p3phy_ops rk3568_ops = {
 	.phy_init = rockchip_p3phy_rk3568_init,
+	.phy_calibrate = rockchip_p3phy_rk3568_calibrate,
 };
 
 static int rockchip_p3phy_rk3588_init(struct rockchip_p3phy_priv *priv)
 {
 	u32 reg = 0;
 	u8 mode = RK3588_LANE_AGGREGATION; /* default */
-	int ret;
 
 	regmap_write(priv->phy_grf, RK3588_PCIE3PHY_GRF_PHY0_LN0_CON1,
 		     priv->rx_cmn_refclk_mode[0] ? RK3588_RX_CMN_REFCLK_MODE_EN :
@@ -171,6 +183,7 @@ static int rockchip_p3phy_rk3588_init(struct rockchip_p3phy_priv *priv)
 	}
 
 	reg = mode;
+	priv->pcie30_phymode = mode;
 	regmap_write(priv->phy_grf, RK3588_PCIE3PHY_GRF_CMN_CON0,
 		     RK3588_PCIE30_PHY_MODE_EN | reg);
 
@@ -184,14 +197,25 @@ static int rockchip_p3phy_rk3588_init(struct rockchip_p3phy_priv *priv)
 
 	reset_control_deassert(priv->p30phy);
 
+	return 0;
+}
+
+static int rockchip_p3phy_rk3588_calibrate(struct rockchip_p3phy_priv *priv)
+{
+	int ret;
+	u32 reg;
+
 	ret = regmap_read_poll_timeout(priv->phy_grf,
 				       RK3588_PCIE3PHY_GRF_PHY0_STATUS1,
 				       reg, RK3588_SRAM_INIT_DONE(reg),
-				       0, 500);
-	ret |= regmap_read_poll_timeout(priv->phy_grf,
-					RK3588_PCIE3PHY_GRF_PHY1_STATUS1,
-					reg, RK3588_SRAM_INIT_DONE(reg),
-					0, 500);
+				       0, RK_SRAM_INIT_TIMEOUT_US);
+	if (priv->pcie30_phymode & (RK3588_LANE_AGGREGATION | RK3588_BIFURCATION_LANE_2_3)) {
+		ret |= regmap_read_poll_timeout(priv->phy_grf,
+						RK3588_PCIE3PHY_GRF_PHY1_STATUS1,
+						reg, RK3588_SRAM_INIT_DONE(reg),
+						0, RK_SRAM_INIT_TIMEOUT_US);
+	}
+
 	if (ret)
 		dev_err(&priv->phy->dev, "lock failed 0x%x, check input refclk and power supply\n",
 			reg);
@@ -200,6 +224,7 @@ static int rockchip_p3phy_rk3588_init(struct rockchip_p3phy_priv *priv)
 
 static const struct rockchip_p3phy_ops rk3588_ops = {
 	.phy_init = rockchip_p3phy_rk3588_init,
+	.phy_calibrate = rockchip_p3phy_rk3588_calibrate,
 };
 
 static int rockchip_p3phy_init(struct phy *phy)
@@ -234,10 +259,22 @@ static int rockchip_p3phy_exit(struct phy *phy)
 	return 0;
 }
 
+static int rockchip_p3phy_calibrate(struct phy *phy)
+{
+	struct rockchip_p3phy_priv *priv = phy_get_drvdata(phy);
+	int ret = 0;
+
+	if (priv->ops->phy_calibrate)
+		ret = priv->ops->phy_calibrate(priv);
+
+	return ret;
+}
+
 static const struct phy_ops rockchip_p3phy_ops = {
 	.init = rockchip_p3phy_init,
 	.exit = rockchip_p3phy_exit,
 	.set_mode = rockchip_p3phy_set_mode,
+	.calibrate = rockchip_p3phy_calibrate,
 	.owner = THIS_MODULE,
 };
 

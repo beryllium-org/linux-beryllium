@@ -333,6 +333,7 @@
 #define FRL_3G3L_RATE			900000000
 #define FRL_6G3L_RATE			1800000000
 #define FRL_8G4L_RATE			3200000000
+#define FRL_FFE_MAX_LEVEL		3
 
 enum dp_link_rate {
 	DP_BW_RBR,
@@ -464,6 +465,16 @@ static const struct ropll_config rk_hdptx_tmds_ropll_cfg[] = {
 	{  33750000ULL,  112,   112,    1,    1,   15,  1,    2,    0,   1,  5,   1,    1, },
 	{  27000000ULL,   90,    90,    1,    1,   15,  0,    9,    0,   5,  0,  20,   24, },
 	{  25175000ULL,   84,    84,    1,    1,   15,  1,  168,    1,  16,  4,   1,    1, },
+};
+
+static const struct ffe_config {
+	u8 pre_shoot;
+	u8 de_emphasis;
+} rk_hdptx_frl_ffe_cfg[FRL_FFE_MAX_LEVEL + 1] = {
+	{ 0x3, 0x4 },
+	{ 0x3, 0x6 },
+	{ 0x3, 0x8 },
+	{ 0x3, 0x9 },
 };
 
 static const struct reg_sequence rk_hdptx_common_cmn_init_seq[] = {
@@ -1028,6 +1039,8 @@ static void rk_hdptx_phy_disable(struct rk_hdptx_phy *hdptx)
 {
 	u32 val;
 
+	dev_dbg(hdptx->dev, "PHY disable\n");
+
 	reset_control_assert(hdptx->rsts[RST_APB].rstc);
 	usleep_range(20, 30);
 	reset_control_deassert(hdptx->rsts[RST_APB].rstc);
@@ -1319,6 +1332,45 @@ static int rk_hdptx_tmds_ropll_mode_config(struct rk_hdptx_phy *hdptx)
 	rk_hdptx_multi_reg_write(hdptx, rk_hdptx_tmds_lane_init_seq);
 
 	return rk_hdptx_post_enable_lane(hdptx);
+}
+
+static int rk_hdptx_frl_ffe_config(struct rk_hdptx_phy *hdptx, u8 ffe_level)
+{
+	u8 val;
+
+	if (ffe_level > FRL_FFE_MAX_LEVEL)
+		return -EINVAL;
+
+	val = rk_hdptx_frl_ffe_cfg[ffe_level].pre_shoot;
+
+	regmap_update_bits(hdptx->regmap, LANE_REG(0305),
+			   LN_TX_DRV_PRE_LVL_CTRL_MASK,
+			   FIELD_PREP(LN_TX_DRV_PRE_LVL_CTRL_MASK, val));
+	regmap_update_bits(hdptx->regmap, LANE_REG(0405),
+			   LN_TX_DRV_PRE_LVL_CTRL_MASK,
+			   FIELD_PREP(LN_TX_DRV_PRE_LVL_CTRL_MASK, val));
+	regmap_update_bits(hdptx->regmap, LANE_REG(0505),
+			   LN_TX_DRV_PRE_LVL_CTRL_MASK,
+			   FIELD_PREP(LN_TX_DRV_PRE_LVL_CTRL_MASK, val));
+	regmap_update_bits(hdptx->regmap, LANE_REG(0605),
+			   LN_TX_DRV_PRE_LVL_CTRL_MASK,
+			   FIELD_PREP(LN_TX_DRV_PRE_LVL_CTRL_MASK, val));
+
+	val = rk_hdptx_frl_ffe_cfg[ffe_level].de_emphasis;
+
+	regmap_update_bits(hdptx->regmap, LANE_REG(0304),
+			   LN_TX_DRV_POST_LVL_CTRL_MASK,
+			   FIELD_PREP(LN_TX_DRV_POST_LVL_CTRL_MASK, val));
+	regmap_update_bits(hdptx->regmap, LANE_REG(0404),
+			   LN_TX_DRV_POST_LVL_CTRL_MASK,
+			   FIELD_PREP(LN_TX_DRV_POST_LVL_CTRL_MASK, val));
+	regmap_update_bits(hdptx->regmap, LANE_REG(0504),
+			   LN_TX_DRV_POST_LVL_CTRL_MASK,
+			   FIELD_PREP(LN_TX_DRV_POST_LVL_CTRL_MASK, val));
+	regmap_update_bits(hdptx->regmap, LANE_REG(0604),
+			   LN_TX_DRV_POST_LVL_CTRL_MASK,
+			   FIELD_PREP(LN_TX_DRV_POST_LVL_CTRL_MASK, val));
+	return 0;
 }
 
 static void rk_hdptx_dp_reset(struct rk_hdptx_phy *hdptx)
@@ -1722,6 +1774,8 @@ static int rk_hdptx_phy_power_off(struct phy *phy)
 {
 	struct rk_hdptx_phy *hdptx = phy_get_drvdata(phy);
 
+	dev_dbg(hdptx->dev, "power_off\n");
+
 	return rk_hdptx_phy_consumer_put(hdptx, false);
 }
 
@@ -1734,6 +1788,13 @@ static int rk_hdptx_phy_verify_hdmi_config(struct rk_hdptx_phy *hdptx,
 	if (hdptx->hdmi_cfg.mode == PHY_HDMI_MODE_FRL) {
 		unsigned long long frl_rate = 100000000ULL * hdmi_in->frl.lanes *
 					      hdmi_in->frl.rate_per_lane;
+
+		if (hdmi_in->frl.set_ffe_level) {
+			if (hdmi_in->frl.ffe_level > FRL_FFE_MAX_LEVEL)
+				return -EINVAL;
+
+			return 0;
+		}
 
 		switch (hdmi_in->frl.rate_per_lane) {
 		case 3:
@@ -2081,11 +2142,18 @@ static int rk_hdptx_phy_configure(struct phy *phy, union phy_configure_opts *opt
 		if (ret) {
 			dev_err(hdptx->dev, "invalid hdmi params for phy configure\n");
 		} else {
-			hdptx->pll_config_dirty = true;
+			if (hdptx->hdmi_cfg.mode == PHY_HDMI_MODE_FRL &&
+			    opts->hdmi.frl.set_ffe_level) {
+				dev_dbg(hdptx->dev, "%s ffe_level=%u\n", __func__,
+					opts->hdmi.frl.ffe_level);
+				ret = rk_hdptx_frl_ffe_config(hdptx, opts->hdmi.frl.ffe_level);
+			} else {
+				hdptx->pll_config_dirty = true;
 
-			dev_dbg(hdptx->dev, "%s %s rate=%llu bpc=%u\n", __func__,
-				hdptx->hdmi_cfg.mode ? "FRL" : "TMDS",
-				hdptx->hdmi_cfg.rate, hdptx->hdmi_cfg.bpc);
+				dev_dbg(hdptx->dev, "%s %s rate=%llu bpc=%u\n", __func__,
+					hdptx->hdmi_cfg.mode ? "FRL" : "TMDS",
+					hdptx->hdmi_cfg.rate, hdptx->hdmi_cfg.bpc);
+			}
 		}
 
 		return ret;
@@ -2154,12 +2222,16 @@ static int rk_hdptx_phy_clk_prepare(struct clk_hw *hw)
 {
 	struct rk_hdptx_phy *hdptx = to_rk_hdptx_phy(hw);
 
+	dev_dbg(hdptx->dev, "clk_prepare\n");
+
 	return rk_hdptx_phy_consumer_get(hdptx);
 }
 
 static void rk_hdptx_phy_clk_unprepare(struct clk_hw *hw)
 {
 	struct rk_hdptx_phy *hdptx = to_rk_hdptx_phy(hw);
+
+	dev_dbg(hdptx->dev, "clk_unprepare\n");
 
 	rk_hdptx_phy_consumer_put(hdptx, true);
 }
@@ -2327,13 +2399,20 @@ static unsigned long rk_hdptx_phy_clk_recalc_rate(struct clk_hw *hw,
 {
 	struct rk_hdptx_phy *hdptx = to_rk_hdptx_phy(hw);
 	u32 status;
+	u64 rate;
 	int ret;
 
 	ret = regmap_read(hdptx->grf, GRF_HDPTX_CON0, &status);
-	if (ret || !(status & HDPTX_I_PLL_EN))
+	if (ret || !(status & HDPTX_I_PLL_EN)) {
+		dev_dbg(hdptx->dev, "%s ret=%d status=%x\n", __func__, ret, status);
 		return 0;
+	}
 
-	return rk_hdptx_phy_clk_calc_rate_from_pll_cfg(hdptx);
+	rate = rk_hdptx_phy_clk_calc_rate_from_pll_cfg(hdptx);
+
+	dev_dbg(hdptx->dev, "%s from_pll=%llu\n", __func__, rate);
+
+	return rate;
 }
 
 static int rk_hdptx_phy_clk_determine_rate(struct clk_hw *hw,
@@ -2341,18 +2420,22 @@ static int rk_hdptx_phy_clk_determine_rate(struct clk_hw *hw,
 {
 	struct rk_hdptx_phy *hdptx = to_rk_hdptx_phy(hw);
 
+	dev_dbg(hdptx->dev, "%s req=%lu par=%lu cfg=%llu dirty=%d\n", __func__,
+		req->rate, req->best_parent_rate, hdptx->hdmi_cfg.rate, hdptx->pll_config_dirty);
 	/*
 	 * For uncommitted PLL configuration, invalidate the current clock rate
 	 * to ensure rk_hdptx_phy_clk_set_rate() will be always invoked.
 	 * Otherwise, restrict the rate according to the PHY link setup.
 	 */
-	if (hdptx->pll_config_dirty)
-		req->rate = 0;
-	else if (hdptx->hdmi_cfg.mode == PHY_HDMI_MODE_FRL)
+
+	if (hdptx->hdmi_cfg.mode == PHY_HDMI_MODE_FRL)
 		req->rate = hdptx->hdmi_cfg.rate;
 	else
 		req->rate = DIV_ROUND_CLOSEST_ULL(hdptx->hdmi_cfg.rate * 8,
 						  hdptx->hdmi_cfg.bpc);
+
+	if (hdptx->pll_config_dirty && req->rate == clk_hw_get_rate(hw))
+		req->rate = 0;
 
 	return 0;
 }
@@ -2362,6 +2445,8 @@ static int rk_hdptx_phy_clk_set_rate(struct clk_hw *hw, unsigned long rate,
 {
 	struct rk_hdptx_phy *hdptx = to_rk_hdptx_phy(hw);
 
+	dev_dbg(hdptx->dev, "%s req=%lu par=%lu cfg=%llu dirty=%d\n", __func__,
+		rate, parent_rate, hdptx->hdmi_cfg.rate, hdptx->pll_config_dirty);
 	/*
 	 * The link rate would be normally programmed in HW during
 	 * phy_ops.power_on() or clk_ops.prepare() callbacks, but it might
@@ -2413,6 +2498,8 @@ static int rk_hdptx_phy_runtime_suspend(struct device *dev)
 {
 	struct rk_hdptx_phy *hdptx = dev_get_drvdata(dev);
 
+	dev_dbg(hdptx->dev, "suspend\n");
+
 	clk_bulk_disable_unprepare(hdptx->nr_clks, hdptx->clks);
 
 	return 0;
@@ -2422,6 +2509,8 @@ static int rk_hdptx_phy_runtime_resume(struct device *dev)
 {
 	struct rk_hdptx_phy *hdptx = dev_get_drvdata(dev);
 	int ret;
+
+	dev_dbg(hdptx->dev, "resume\n");
 
 	ret = clk_bulk_prepare_enable(hdptx->nr_clks, hdptx->clks);
 	if (ret)
