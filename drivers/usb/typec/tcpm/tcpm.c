@@ -856,6 +856,8 @@ static void _tcpm_log(struct tcpm_port *port, const char *fmt, va_list args)
 
 	vsnprintf(tmpbuffer, sizeof(tmpbuffer), fmt, args);
 
+	dev_dbg(port->dev, "%s\n", tmpbuffer);
+
 	if (tcpm_log_full(port)) {
 		port->logbuffer_head = max(port->logbuffer_head - 1, 0);
 		strscpy(tmpbuffer, "overflow");
@@ -1870,6 +1872,15 @@ static bool tcpm_ams_interruptible(struct tcpm_port *port)
 	}
 
 	return true;
+}
+
+static void tcpm_vdm_handle_ams_interruption(struct tcpm_port *port)
+{
+	tcpm_log(port, "VDM AMS state machine got interrupted");
+
+	port->vdm_state = VDM_STATE_ERR_BUSY;
+	tcpm_ams_finish(port);
+	mod_vdm_delayed_work(port, 0);
 }
 
 static int tcpm_ams_start(struct tcpm_port *port, enum tcpm_ams ams)
@@ -3553,11 +3564,8 @@ static void tcpm_pd_data_request(struct tcpm_port *port,
 	bool frs_enable;
 	int ret;
 
-	if (tcpm_vdm_ams(port) && type != PD_DATA_VENDOR_DEF) {
-		port->vdm_state = VDM_STATE_ERR_BUSY;
-		tcpm_ams_finish(port);
-		mod_vdm_delayed_work(port, 0);
-	}
+	if (tcpm_vdm_ams(port) && type != PD_DATA_VENDOR_DEF)
+		tcpm_vdm_handle_ams_interruption(port);
 
 	switch (type) {
 	case PD_DATA_SOURCE_CAP:
@@ -3754,11 +3762,8 @@ static void tcpm_pd_ctrl_request(struct tcpm_port *port,
 	 * Stop VDM state machine if interrupted by other Messages while NOT_SUPP is allowed in
 	 * VDM AMS if waiting for VDM responses and will be handled later.
 	 */
-	if (tcpm_vdm_ams(port) && type != PD_CTRL_NOT_SUPP && type != PD_CTRL_GOOD_CRC) {
-		port->vdm_state = VDM_STATE_ERR_BUSY;
-		tcpm_ams_finish(port);
-		mod_vdm_delayed_work(port, 0);
-	}
+	if (tcpm_vdm_ams(port) && type != PD_CTRL_NOT_SUPP && type != PD_CTRL_GOOD_CRC)
+		tcpm_vdm_handle_ams_interruption(port);
 
 	switch (type) {
 	case PD_CTRL_GOOD_CRC:
@@ -4080,11 +4085,8 @@ static void tcpm_pd_ext_msg_request(struct tcpm_port *port,
 	const struct pd_chunked_ext_message_data *ext_msg = &msg->ext_msg;
 
 	/* stopping VDM state machine if interrupted by other Messages */
-	if (tcpm_vdm_ams(port)) {
-		port->vdm_state = VDM_STATE_ERR_BUSY;
-		tcpm_ams_finish(port);
-		mod_vdm_delayed_work(port, 0);
-	}
+	if (tcpm_vdm_ams(port))
+		tcpm_vdm_handle_ams_interruption(port);
 
 	if (!(le16_to_cpu(ext_msg->header) & PD_EXT_HDR_CHUNKED)) {
 		tcpm_pd_handle_msg(port, PD_MSG_CTRL_NOT_SUPP, NONE_AMS);
@@ -5841,20 +5843,25 @@ static void run_state_machine(struct tcpm_port *port)
 			tcpm_set_state(port, SNK_READY, 0);
 			break;
 		}
+
 		/*
+		 * For non self-powered devices, first of all try explicitly
+		 * requesting the source capabilities for better support of
+		 * of non-compliant PD sources (a comment with more details is
+		 * in the SNK_WAIT_CAPABILITIES_TIMEOUT state).
+		 *
 		 * If VBUS has never been low, and we time out waiting
 		 * for source cap, try a soft reset first, in case we
 		 * were already in a stable contract before this boot.
 		 * Do this only once.
 		 */
-		if (port->vbus_never_low) {
+		if (!port->self_powered) {
+			upcoming_state = SNK_WAIT_CAPABILITIES_TIMEOUT;
+		} else if (port->vbus_never_low) {
 			port->vbus_never_low = false;
 			upcoming_state = SNK_SOFT_RESET;
 		} else {
-			if (!port->self_powered)
-				upcoming_state = SNK_WAIT_CAPABILITIES_TIMEOUT;
-			else
-				upcoming_state = hard_reset_state(port);
+			upcoming_state = hard_reset_state(port);
 		}
 
 		tcpm_set_state(port, upcoming_state,
@@ -5876,10 +5883,17 @@ static void run_state_machine(struct tcpm_port *port)
 		 * and handled by all USB PD source and dual role devices
 		 * according to the specification.
 		 */
+		if (port->vbus_never_low) {
+			port->vbus_never_low = false;
+			upcoming_state = SNK_SOFT_RESET;
+		} else {
+			upcoming_state = hard_reset_state(port);
+		}
+
 		if (tcpm_pd_send_control(port, PD_CTRL_GET_SOURCE_CAP, TCPC_TX_SOP))
-			tcpm_set_state_cond(port, hard_reset_state(port), 0);
+			tcpm_set_state_cond(port, upcoming_state, 0);
 		else
-			tcpm_set_state(port, hard_reset_state(port),
+			tcpm_set_state(port, upcoming_state,
 				       port->timings.sink_wait_cap_time);
 		break;
 	case SNK_NEGOTIATE_CAPABILITIES:
@@ -8077,7 +8091,7 @@ static void tcpm_port_unregister_pd(struct tcpm_port *port)
 	for (i = 0; i < port->pd_count; i++) {
 		usb_power_delivery_unregister_capabilities(port->pd_list[i]->sink_cap);
 		usb_power_delivery_unregister_capabilities(port->pd_list[i]->source_cap);
-		devm_kfree(port->dev, port->pd_list[i]);
+		kfree(port->pd_list[i]);
 		port->pd_list[i] = NULL;
 		usb_power_delivery_unregister(port->pds[i]);
 		port->pds[i] = NULL;
@@ -8376,7 +8390,7 @@ static int tcpm_fw_get_caps(struct tcpm_port *port, struct fwnode_handle *fwnode
 	}
 
 	for (i = 0; i < port->pd_count; i++) {
-		port->pd_list[i] = devm_kzalloc(port->dev, sizeof(struct pd_data), GFP_KERNEL);
+		port->pd_list[i] = kzalloc_obj(*port->pd_list[i]);
 		if (!port->pd_list[i]) {
 			ret = -ENOMEM;
 			goto put_capabilities;
@@ -8997,6 +9011,30 @@ void tcpm_unregister_port(struct tcpm_port *port)
 	tcpm_debugfs_exit(port);
 }
 EXPORT_SYMBOL_GPL(tcpm_unregister_port);
+
+static void devm_tcpm_unregister_port(void *data)
+{
+	struct tcpm_port *port = data;
+	tcpm_unregister_port(port);
+}
+
+struct tcpm_port *devm_tcpm_register_port(struct device *dev,
+					  struct tcpc_dev *tcpc)
+{
+	struct tcpm_port *result;
+	int ret;
+
+	result = tcpm_register_port(dev, tcpc);
+	if (IS_ERR(result))
+		return result;
+
+	ret = devm_add_action_or_reset(dev, devm_tcpm_unregister_port, result);
+	if (ret  < 0)
+		return ERR_PTR(ret);
+
+	return result;
+}
+EXPORT_SYMBOL_GPL(devm_tcpm_register_port);
 
 MODULE_AUTHOR("Guenter Roeck <groeck@chromium.org>");
 MODULE_DESCRIPTION("USB Type-C Port Manager");

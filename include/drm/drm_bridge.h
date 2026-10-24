@@ -541,6 +541,20 @@ struct drm_bridge_funcs {
 	void (*hpd_disable)(struct drm_bridge *bridge);
 
 	/**
+	 * @oob_notify:
+	 *
+	 * Notify the bridge of out of band hot plug detection.
+	 *
+	 * This callback is optional, it may be implemented by bridges that
+	 * need to be notified of display connection or disconnection for
+	 * internal reasons. One use case is to force the DP controllers HPD
+	 * signal for USB-C DP AltMode.
+	 */
+	void (*oob_notify)(struct drm_bridge *bridge,
+			   struct drm_connector *connector,
+			   enum drm_connector_status status);
+
+	/**
 	 * @hdmi_tmds_char_rate_valid:
 	 *
 	 * Check whether a particular TMDS character rate is supported by the
@@ -560,6 +574,154 @@ struct drm_bridge_funcs {
 	(*hdmi_tmds_char_rate_valid)(const struct drm_bridge *bridge,
 				     const struct drm_display_mode *mode,
 				     unsigned long long tmds_rate);
+
+	/**
+	 * @hdmi_scrambler_enable:
+	 *
+	 * Enable source-side scrambling and the high TMDS clock ratio for the
+	 * mode currently being applied.
+	 *
+	 * This only programs the source side. Sink-side SCDC configuration is
+	 * handled by the HDMI connector helpers.
+	 *
+	 * Mandatory for bridges that set the DRM_BRIDGE_OP_HDMI flag in their
+	 * &drm_bridge->ops and advertise HDMI_VERSION_2_0 or later via
+	 * &drm_bridge->supported_hdmi_ver; unused otherwise.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise.
+	 */
+	int (*hdmi_scrambler_enable)(struct drm_bridge *bridge);
+
+	/**
+	 * @hdmi_scrambler_disable:
+	 *
+	 * Disable source-side scrambling and the high TMDS clock ratio.
+	 *
+	 * This only programs the source side. Sink-side SCDC configuration is
+	 * handled by the HDMI connector helpers.
+	 *
+	 * Mandatory for bridges that set the DRM_BRIDGE_OP_HDMI flag in their
+	 * &drm_bridge->ops and advertise HDMI_VERSION_2_0 or later via
+	 * &drm_bridge->supported_hdmi_ver; unused otherwise.
+	 *
+	 * Returns:
+	 * 0 on success, a negative error code otherwise.
+	 */
+	int (*hdmi_scrambler_disable)(struct drm_bridge *bridge);
+
+	/**
+	 * @hdmi_frl_configure:
+	 *
+	 * Configure the bridge / source PHY for the given HDMI 2.1 Fixed
+	 * Rate Link (FRL) operating point.
+	 *
+	 * Called by the FRL helpers to switch the PHY to the requested
+	 * per-lane rate and lane count.
+	 *
+	 * This callback is optional but it must be implemented by bridges
+	 * that set the DRM_BRIDGE_OP_HDMI_FRL flag in their &drm_bridge->ops.
+	 */
+	int (*hdmi_frl_configure)(struct drm_bridge *bridge,
+				  u8 rate_per_lane, u8 lanes);
+
+	/**
+	 * @hdmi_frl_set_ltp:
+	 *
+	 * Apply the per-lane Link Training Pattern (LTP) requested by the sink.
+	 *
+	 * The four arguments are the raw request values read from SCDC. The
+	 * bridge is expected to translate them into the IP-specific lane
+	 * training register format and write them to hardware.
+	 *
+	 * This callback is optional but it must be implemented by bridges
+	 * that set the DRM_BRIDGE_OP_HDMI_FRL flag in their &drm_bridge->ops.
+	 */
+	int (*hdmi_frl_set_ltp)(struct drm_bridge *bridge,
+				u8 ln0, u8 ln1, u8 ln2, u8 ln3);
+
+	/**
+	 * @hdmi_frl_tx_start:
+	 *
+	 * Resume the video pipeline once FRL link training has reached LTSP.
+	 *
+	 * Implementations are expected to unmute AV and start the control
+	 * packets transmission.
+	 *
+	 * This callback is optional but it must be implemented by bridges
+	 * that set the DRM_BRIDGE_OP_HDMI_FRL flag in their &drm_bridge->ops.
+	 */
+	int (*hdmi_frl_tx_start)(struct drm_bridge *bridge);
+
+	/**
+	 * @hdmi_frl_tx_stop:
+	 *
+	 * Quiesce the bridge video pipeline during FRL link training.
+	 *
+	 * Implementations are expected to mute AV and stop the control
+	 * packets transmission.
+	 *
+	 * This callback is optional but it must be implemented by bridges
+	 * that set the DRM_BRIDGE_OP_HDMI_FRL flag in their &drm_bridge->ops.
+	 */
+	int (*hdmi_frl_tx_stop)(struct drm_bridge *bridge);
+
+	/**
+	 * @hdmi_frl_fallback_tmds:
+	 *
+	 * Fall back the link operation mode to TMDS when FRL is not supported
+	 * by the sink, not required for the current mode, or when FRL link
+	 * training has failed.
+	 *
+	 * Implementations are expected to program the PHY for the TMDS
+	 * character rate of the current mode and leave the link ready to
+	 * transmit video. This callback may be invoked when TMDS operation
+	 * is already active and must be idempotent.
+	 *
+	 * This callback is optional but it must be implemented by bridges
+	 * that set the DRM_BRIDGE_OP_HDMI_FRL flag in their &drm_bridge->ops.
+	 */
+	int (*hdmi_frl_fallback_tmds)(struct drm_bridge *bridge);
+
+	/**
+	 * @hdmi_frl_set_ffe_level:
+	 *
+	 * Optional callback used to increase the per-lane TxFFE
+	 * (Transmitter Feed-Forward Equalization) level when the sink
+	 * requests stronger equalization during LTS:3.
+	 *
+	 * Bridges that implement this callback must set the
+	 * DRM_BRIDGE_OP_HDMI_FRL flag in their &drm_bridge->ops.
+	 *
+	 * @ffe_level: target TxFFE level (1..3).
+	 */
+	int (*hdmi_frl_set_ffe_level)(struct drm_bridge *bridge, u8 ffe_level);
+
+	/**
+	 * @hdmi_frl_rate_valid:
+	 *
+	 * Check whether a particular mode is supported by the driver within
+	 * a given FRL rate range (min and max expressed in Gbps).
+	 *
+	 * Optionally, @pref_frl_rate can be used by the driver to restrict
+	 * the mode to a specific rate (in Gbps) within this range.
+	 *
+	 * This callback is optional and should only be implemented by the
+	 * bridges that take part in the HDMI connector implementation.
+	 * Bridges that implement it shall set the DRM_BRIDGE_OP_HDMI flag in
+	 * their &drm_bridge->ops.
+	 *
+	 * Returns:
+	 *
+	 * Either &drm_mode_status.MODE_OK or one of the failure reasons
+	 * in &enum drm_mode_status.
+	 */
+	enum drm_mode_status
+	(*hdmi_frl_rate_valid)(const struct drm_bridge *bridge,
+			       const struct drm_display_mode *mode,
+			       unsigned int min_frl_rate,
+			       unsigned int max_frl_rate,
+			       unsigned int *pref_frl_rate);
 
 	/**
 	 * @hdmi_clear_avi_infoframe:
@@ -1082,6 +1244,12 @@ struct drm_bridge {
 	const char *product;
 
 	/**
+	 * @supported_hdmi_ver: HDMI version the bridge is conformant with.
+	 * This is only relevant if @DRM_BRIDGE_OP_HDMI is set.
+	 */
+	enum hdmi_version supported_hdmi_ver;
+
+	/**
 	 * @supported_formats: Bitmask of @drm_output_color_format listing
 	 * supported output formats. This is only relevant if
 	 * @DRM_BRIDGE_OP_HDMI is set.
@@ -1089,11 +1257,58 @@ struct drm_bridge {
 	unsigned int supported_formats;
 
 	/**
+	 * @max_tmds_char_rate: Maximum TMDS character rate, in Hz, the HDMI
+	 * bridge supports. A value of 0 means the core should use the default
+	 * limit implied by @supported_hdmi_ver. This is only relevant if
+	 * @DRM_BRIDGE_OP_HDMI is set.
+	 */
+	unsigned long long max_tmds_char_rate;
+
+	/**
 	 * @max_bpc: Maximum bits per char the HDMI bridge supports. Allowed
 	 * values are 8, 10 and 12. This is only relevant if
 	 * @DRM_BRIDGE_OP_HDMI is set.
 	 */
 	unsigned int max_bpc;
+
+	/**
+	 * @min_frl_rate_per_lane: Minimum FRL rate per lane, in Gbps,
+	 * the HDMI bridge supports. A value of 0 means the core should use the
+	 * default limit implied by @supported_hdmi_ver. This is only relevant
+	 * if @DRM_BRIDGE_OP_HDMI is set.
+	 */
+	u8 min_frl_rate_per_lane;
+
+	/**
+	 * @min_frl_lanes: Minimum FRL lane count the HDMI bridge supports.
+	 * A value of 0 means the core should use the default limit implied
+	 * by @supported_hdmi_ver. This is only relevant if @DRM_BRIDGE_OP_HDMI
+	 * is set.
+	 */
+	u8 min_frl_lanes;
+
+	/**
+	 * @max_frl_rate_per_lane: Maximum FRL rate per lane, in Gbps, the
+	 * HDMI bridge supports. A value of 0 means the core should use the
+	 * default limit implied by @supported_hdmi_ver. This is only relevant
+	 * if @DRM_BRIDGE_OP_HDMI is set.
+	 */
+	u8 max_frl_rate_per_lane;
+
+	/**
+	 * @max_frl_lanes: Maximum FRL lane count the HDMI bridge supports.
+	 * A value of 0 means the core should use the default limit implied
+	 * by @supported_hdmi_ver. This is only relevant if @DRM_BRIDGE_OP_HDMI
+	 * is set.
+	 */
+	u8 max_frl_lanes;
+
+	/**
+	 * @max_ffe_level: Maximum TxFFE (Transmitter Feed-Forward Equalization)
+	 * level the HDMI bridge supports. Valid range is 0..3, as defined by
+	 * HDMI 2.1 spec. This is only relevant if @DRM_BRIDGE_OP_HDMI is set.
+	 */
+	u8 max_ffe_level;
 
 	/**
 	 * @hdmi_cec_dev: device to be used as a containing device for CEC

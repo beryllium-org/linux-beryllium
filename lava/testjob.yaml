@@ -1,0 +1,679 @@
+device_type: {{job.DEVTYPE}}
+
+job_name: Hardware enablement {{ job.LAVA_TEST }} test on {{job.DEVTYPE}} {{job.CI_JOB_ID}}
+timeouts:
+  job:
+    minutes: 15
+  action:
+   minutes: 5
+priority: high
+visibility: public
+
+context:
+  extra_kernel_args: rootwait systemd.tty.term.console=dumb loglevel=8 tcpm.dyndbg="+p" fusb302.dyndbg="+p"
+
+actions:
+  - deploy:
+      timeout:
+        minutes: 5
+      timeouts:
+        http-download:
+          minutes: 5 {{! Workaround for http-download timeout divided by number of retries}}
+      to: tftp
+      kernel:
+        url: "{{job.CI_PROJECT_URL}}/-/jobs/%%KERNEL_BUILD_JOB%%/artifacts/raw/vmlinuz"
+        type: image
+      modules:
+        url: "{{job.CI_PROJECT_URL}}/-/jobs/%%KERNEL_BUILD_JOB%%/artifacts/raw/modules.tar.gz"
+        compression: gz
+      dtb:
+        url: "{{job.CI_PROJECT_URL}}/-/jobs/%%KERNEL_BUILD_JOB%%/artifacts/raw/dtbs/rockchip/{{job.DEVTYPE}}.dtb"
+      ramdisk:
+        url: https://gitlab.collabora.com/hardware-enablement/rockchip-3588/debian-image-recipes/-/jobs/artifacts/main/raw/out/trixie-rootfs-arm64-initramfs.gz?job=ci+image
+        compression: gz
+      nfsrootfs:
+        url: https://gitlab.collabora.com/hardware-enablement/rockchip-3588/debian-image-recipes/-/jobs/artifacts/main/raw/out/trixie-rootfs-arm64.tar.gz?job=ci+image
+        compression: gz
+
+  - boot:
+      method: u-boot
+      commands: nfs
+      timeout:
+        minutes: 10
+      auto_login:
+        login_prompt: 'login:'
+        username: user
+        password_prompt: 'Password:'
+        password: user
+        login_commands:
+          - sudo su
+          - export TERM=dumb
+          - export SYSTEMD_LOG_COLOR=no
+          - export SYSTEMD_PAGER=cat
+          - export SYSTEMD_PAGERSECURE=false
+          - export SYSTEMD_COLORS=no
+          - env
+          - systemctl --failed
+          - timedatectl set-ntp true
+          - systemctl restart systemd-timesyncd
+          - sleep 15 # wait for delayed regulator poweroff
+      error_patterns:
+        - "typec_fusb302 4-0022: Initiating hard-reset, which might result in machine power-loss."
+        - "typec_fusb302 4-0022: Received hard reset"
+      prompts:
+        - 'user@rk3588-ci:(.*)$'
+        - 'root@rk3588-ci:(.*)#'
+
+{{ #if job.LAVA_TEST_AVVIDEOCOMPARE }}
+  - test:
+      definitions:
+        - from: git
+          name: avvideocompare
+          path: avvideocompare/avvideocompare.yaml
+          repository: https://gitlab.collabora.com/hardware-enablement/common/lava-test-definitions.git
+          revision: main
+          parameters:
+            PIPELINE1: "{{{ job.AVVIDEOCOMPARE_GST_PIPELINE1 }}}"
+            PIPELINE2: "{{{ job.AVVIDEOCOMPARE_GST_PIPELINE2 }}}"
+            VID_SRC_MEDIA_TYPE: "{{{ job.AVVIDEOCOMPARE_GST_VID_SRC_MEDIA_TYPE }}}"
+            MIN_SCORE: "{{{ job.AVVIDEOCOMPARE_MIN_SCORE }}}"
+      timeout:
+        minutes: 10
+{{ /if }}
+{{ #if job.LAVA_TEST_BASELINE }}
+  - test:
+      timeout:
+        minutes: 5
+      definitions:
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: rtc
+            description: "Run some RTC/NTP tests"
+            os:
+              - apertis
+            scope:
+              - functional
+            environment:
+              - lava-test-shell
+          run:
+            steps:
+              - ip link
+              - hwclock -w
+              - timedatectl set-ntp true
+              - systemctl restart systemd-timesyncd
+              - timedatectl status
+              - timedatectl timesync-status
+        from: inline
+        name: rtc
+        path: inline/rtc.yaml
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: usb
+            description: "Run USB tests"
+            os:
+              - apertis
+            scope:
+              - functional
+            environment:
+              - lava-test-shell
+          run:
+            steps:
+              - lsusb
+        from: inline
+        name: usb
+        path: inline/usb.yaml
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: pci
+            description: "Run PCI tests"
+            os:
+              - apertis
+            scope:
+              - functional
+            environment:
+              - lava-test-shell
+          run:
+            steps:
+              - lspci -nn
+        from: inline
+        name: pci
+        path: inline/pci.yaml
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: i2c
+            description: "Run I2C tests"
+            os:
+              - apertis
+            scope:
+              - functional
+            environment:
+              - lava-test-shell
+          run:
+            steps:
+              - i2cdetect -l
+        from: inline
+        name: i2c
+        path: inline/i2c.yaml
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: alsa
+            description: "Run ALSA tests"
+            os:
+              - apertis
+            scope:
+              - functional
+            environment:
+              - lava-test-shell
+          run:
+            steps:
+              - cat /proc/asound/cards
+        from: inline
+        name: alsa
+        path: inline/alsa.yaml
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: hwmon
+            description: "Run hwmon tests"
+            os:
+              - apertis
+            scope:
+              - functional
+            environment:
+              - lava-test-shell
+          run:
+            steps:
+              - sensors
+        from: inline
+        name: hwmon
+        path: inline/hwmon.yaml
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: iio
+            description: "Run iio tests"
+            os:
+              - apertis
+            scope:
+              - functional
+            environment:
+              - lava-test-shell
+          run:
+            steps:
+              - iio_info
+        from: inline
+        name: iio
+        path: inline/iio.yaml
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: nvmem
+            description: "Run nvmem tests"
+            os:
+              - apertis
+            scope:
+              - functional
+            environment:
+              - lava-test-shell
+          run:
+            steps:
+              - hexdump /sys/bus/nvmem/devices/rockchip-otp0/nvmem
+        from: inline
+        name: nvmem
+        path: inline/nvmem.yaml
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: tcpm
+            description: "Run tcpm tests"
+            os:
+              - apertis
+            scope:
+              - functional
+            environment:
+              - lava-test-shell
+          run:
+            steps:
+              - cat /sys/class/power_supply/tcpm-source-psy-4-0022/uevent || true
+        from: inline
+        name: tcpm
+        path: inline/tcpm.yaml
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: v4l2
+            description: "Run v4l2 tests"
+            os:
+              - apertis
+            scope:
+              - functional
+            environment:
+              - lava-test-shell
+          run:
+            steps:
+              - find /dev -mindepth 1 -maxdepth 1 -type c -name 'video*' -exec bash -c 'echo "Device $0" ; v4l2-ctl -d $0 -l -D ; echo ""' {} \;
+        from: inline
+        name: v4l2
+        path: inline/v4l2.yaml
+{{ /if }}
+{{ #if job.LAVA_TEST_V4L2_COMPLIANCE }}
+  - test:
+      timeout:
+        minutes: 10
+      definitions:
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: v4l2-compliance-hdmirx
+            description: "Run v4l2-compliance on the HDMI RX capture device (HDMI TX looped back to HDMI RX)"
+            os:
+              - debian
+            scope:
+              - functional
+            environment:
+              - lava-test-shell
+          run:
+            steps:
+              - modprobe synopsys-hdmirx || true
+              - |
+                node=""
+                for d in /sys/class/video4linux/video*; do
+                  if [ "$(cat $d/name)" = "stream_hdmirx" ]; then node=/dev/$(basename $d); break; fi
+                done
+                echo "HDMIRX node: ${node}"
+                if [ -z "$node" ]; then lava-test-case hdmirx-node-found --result fail; exit 0; fi
+                lava-test-case hdmirx-node-found --result pass
+                v4l2-ctl -d $node --all || true
+                v4l2-ctl -d $node --query-dv-timings || true
+                v4l2-compliance -d $node -s 2>&1 | tee /tmp/v4l2-compliance.log
+                # v4l2-compliance prints "Total for <drv> device <node>: N, Succeeded: N, Failed: N, Warnings: N"
+                if grep -q "Failed: 0," /tmp/v4l2-compliance.log; then
+                  lava-test-case v4l2-compliance-hdmirx --result pass
+                else
+                  lava-test-case v4l2-compliance-hdmirx --result fail
+                fi
+        from: inline
+        name: v4l2-compliance-hdmirx
+        path: inline/v4l2-compliance-hdmirx.yaml
+{{ /if }}
+{{ #if job.LAVA_TEST_CEC }}
+  - test:
+      timeout:
+        minutes: 10
+      definitions:
+      - repository:
+          metadata:
+            format: Lava-Test Test Definition 1.0
+            name: cec-hdmirx-loopback
+            description: "Run cec-compliance between the HDMI RX and HDMI TX CEC adapters in both directions (HDMI TX looped back to HDMI RX)"
+            os:
+              - debian
+            scope:
+              - functional
+            environment:
+              - lava-test-shell
+          run:
+            steps:
+              - |
+                cec_find() { for d in /dev/cec*; do cec-ctl -d $d | grep -q "Driver Name[[:space:]]*: $1\$" && echo $d; done; true; }
+                                RX=$(cec_find snps_hdmirx | head -n1)
+                echo "HDMI RX CEC: ${RX}"
+                if [ -z "$RX" ]; then lava-test-case cec-rx-found --result fail; exit 0; fi
+                lava-test-case cec-rx-found --result pass
+                # the TX looped back to the RX is the one whose DRM connector is connected
+                # prints "<card> <connector name>" if the DRM connector of this CEC adapter is connected
+                tx_connected() {
+                  cec-ctl -d $1 | sed -n 's/^.*DRM Connector Info[[:space:]]*:[[:space:]]*card \([0-9]*\), connector \([0-9]*\).*$/\1 \2/p' | {
+                    read card conn
+                    for c in /sys/class/drm/card${card}-*; do
+                      [ "$(cat $c/connector_id)" = "$conn" ] && [ "$(cat $c/status)" = "connected" ] && echo "$card ${c#/sys/class/drm/card${card}-}"
+                    done
+                  } || true
+                }
+                TX=""
+                for d in $(cec_find dwhdmiqp-rockchip); do
+                  echo "TX candidate $d: $(cec-ctl -d $d | grep -E 'Adapter Name|DRM Connector Info' | tr -s ' \t' ' ' | tr '\n' ' ') connected=$(tx_connected $d)"
+                  if [ -n "$(tx_connected $d)" ]; then
+                    # both HDMI outputs have a CEC adapter, only one is cabled to the RX
+                    if [ -n "$TX" ]; then echo "more than one TX connected"; TX=""; break; fi
+                    TX=$d
+                    TXCONN=$(tx_connected $d)
+                  fi
+                done
+                if [ -n "$TX" ] && [ "$(cec-ctl -d $TX | sed -n 's/^[[:space:]]*Physical Address[[:space:]]*:[[:space:]]*//p')" = "f.f.f.f" ]; then
+                  # TX can't read the RX EDID over DDC, so it never gets a CEC physical address.
+                  # Override the connector EDID with the RX default EDID (physical address 1.0.0.0).
+                  set -- $TXCONN
+                  printf '\000\377\377\377\377\377\377\000\061\330\064\022\000\000\000\000\042\032\001\003\200\140\066\170\017\356\221\243\124\114\231\046\017\120\124\057\317\000\061\131\105\131\201\200\201\100\220\100\225\000\251\100\263\000\004\164\000\060\362\160\132\200\260\130\212\000\300\034\062\000\000\036\000\000\000\375\000\030\125\030\207\036\000\012\040\040\040\040\040\040\000\000\000\374\000\150\144\155\151\055\064\153\055\063\060\060\012\040\000\000\000\020\000\000\000\000\000\000\000\000\000\000\000\000\000\000\001\305\002\003\100\361\117\137\136\135\020\037\004\023\042\041\040\005\024\002\021\001\043\011\007\007\203\001\000\000\155\003\014\000\020\000\000\074\041\000\140\001\002\003\147\330\135\304\001\000\000\000\342\000\312\343\005\000\000\343\006\001\000\342\015\137\243\146\000\240\360\160\037\200\060\040\065\000\300\034\062\000\000\036\032\066\200\240\160\070\037\100\060\040\065\000\300\034\062\000\000\032\032\035\000\200\121\320\034\040\100\200\065\000\300\034\062\000\000\034\000\000\000\000\000\000\000\000\000\241' > /tmp/rx-edid.bin
+                  cat /tmp/rx-edid.bin > /sys/kernel/debug/dri/$1/$2/edid_override
+                  echo detect > /sys/class/drm/card$1-$2/status
+                  sleep 3
+                fi
+                cec-ctl -d $TX | grep -i "Physical Address"
+                echo "HDMI TX CEC: ${TX}"
+                if [ -z "$TX" ]; then lava-test-case cec-tx-found --result fail; exit 0; fi
+                lava-test-case cec-tx-found --result pass
+                # $1 test name, $2/$3 compliance dev/type, $4/$5 follower dev/type, $6 follower logical address
+                run_dir() {
+                  cec-ctl -d $2 --clear > /dev/null; cec-ctl -d $4 --clear > /dev/null
+                  # pre-start the follower side first, so it is running before the compliance side starts talking
+                  cec-ctl -d $4 --$5 -S
+                  cec-follower -d $4 > /tmp/cec-follower-$1.log 2>&1 < /dev/null &
+                  fpid=$!
+                  sleep 2
+                  cec-ctl -d $2 --$3 -S
+                  for d in $2 $4; do cec-ctl -d $d | grep -E "Logical Address Mask|Logical Addresses"; done
+                  timeout 300 cec-compliance -d $2 -r$6 > /tmp/cec-compliance-$1.log 2>&1 < /dev/null || true
+                  cat /tmp/cec-compliance-$1.log
+                  kill $fpid || true; wait $fpid 2>/dev/null || true
+                  echo "---- cec-follower log ($1)"; cat /tmp/cec-follower-$1.log
+                  # summary line: "Total for <drv> device <dev>: N, Succeeded: N, Failed: N, Warnings: N"
+                  if grep -q "^Total for .*Failed: 0," /tmp/cec-compliance-$1.log; then
+                    lava-test-case $1 --result pass
+                  else
+                    lava-test-case $1 --result fail
+                  fi
+                  cec-ctl -d $2 --clear > /dev/null; cec-ctl -d $4 --clear > /dev/null
+                }
+                run_dir cec-compliance-rx-tv-to-tx-playback $RX tv $TX playback 4
+                # adapter API test only needs the other adapter configured as a remote device, no follower
+                adapter_test() {
+                  cec-ctl -d $2 --clear > /dev/null; cec-ctl -d $3 --clear > /dev/null
+                  cec-ctl -d $3 --$5 -S
+                  cec-ctl -d $2 --$4 -S
+                  timeout 120 cec-compliance -d $2 -A > /tmp/cec-adapter-$1.log 2>&1 < /dev/null || true
+                }
+                adapter_test rx $RX $TX tv playback
+                adapter_test tx $TX $RX playback tv
+                for side in rx tx; do
+                  echo "---- cec-compliance -A ($side)"; cat /tmp/cec-adapter-$side.log
+                  if grep -q "^Total for .*Failed: 0," /tmp/cec-adapter-$side.log; then
+                    lava-test-case cec-compliance-adapter-$side --result pass
+                  else
+                    lava-test-case cec-compliance-adapter-$side --result fail
+                  fi
+                done
+                cec-ctl -d $RX --clear > /dev/null; cec-ctl -d $TX --clear > /dev/null
+        from: inline
+        name: cec-hdmirx-loopback
+        path: inline/cec-hdmirx-loopback.yaml
+{{ /if }}
+{{ #if job.LAVA_TEST_DMESG }}
+  - test:
+      definitions:
+        - from: git
+          name: dmesg
+          path: dmesg/dmesg.yaml
+          repository: https://gitlab.collabora.com/hardware-enablement/common/lava-test-definitions.git
+          revision: main
+          parameters:
+            LEVELS: crit,alert,emerg,err,warn
+            IGNORE_REGEX: >-
+              dw-apb-uart .* forbid DMA for kernel console|
+              gpio gpiochip.*: Static allocation of GPIO base is deprecated, use dynamic allocation|
+              panthor fb000000.gpu: \[drm\] Firmware protected mode entry not be supported, ignoring|
+              panthor fb000000.gpu: \[drm\] Firmware protected mode entry is not supported, ignoring|
+              pci .*: Primary bus is hard wired to 0|
+              platform .*pcie: deferred probe pending: rockchip-dw-pcie: missing PHY|
+              platform .*usb: deferred probe pending: dwc3: failed to initialize core|
+              platform .*usb: deferred probe pending: dwc3-rockchip: failed to initialize core|
+              platform sdio-pwrseq: deferred probe pending: pwrseq_simple: external clock not ready|
+              platform 2a320000.mmc: deferred probe pending: platform: supplier sdio-pwrseq not ready|
+              platform regulatory.0: Direct firmware load for regulatory.db failed with error -2|
+              faux_driver regulatory: Direct firmware load for regulatory.db failed with error -2|
+              r8169 0004:41:00.0: Unable to load firmware rtl_nic/rtl8125b-2.fw \(-2\)|
+              Failed to create device link \(0x180\) with supplier|
+              rockchip-pm-domain [0-9a-f]*.power-management:power-controller: Failed to enable supply: -517|
+              rockchip-pm-domain [0-9a-f]*.power-management:power-controller: sync_state\(\) pending due to|
+              rockchip-thermal .* Missing rockchip,grf property|
+              rtc-hym8563 .* hctosys: unable to read the hardware clock|
+              rtc-hym8563 .* no valid clock/calendar values available|
+              rtc-hym8563 2-0051: could not init device, -6|
+              dwmmc_rockchip fe2d0000.mmc: Busy; trying anyway|
+              dwmmc_rockchip 2a320000.mmc: card claims to support voltages below defined range|
+              mmc_host mmc2: Timeout sending command \(cmd 0x202000 arg 0x0 status 0x80202000\)|
+              dwhdmiqp-rockchip fde80000.hdmi: i2c read error|
+              dwhdmiqp-rockchip fde80000.hdmi: i2c read timed out|
+              fdee0000.hdmi_receiver: hdmirx_wait_signal_lock wait avi_pkt_rcv failed|
+              fdee0000.hdmi_receiver: failed to unpack AVI infoframe|
+              rockchip-drm display-subsystem: .* HDMI Sink doesn.* support RGB, something.* wrong|
+              rk_gmac-dwmac .* Can not read property: [rt]x_delay|
+              rk_gmac-dwmac .* set [rt]x_delay to|
+              rk_gmac-dwmac .* supply phy not found, using dummy regulator|
+              rockchip-usb2phy .* Requested PHY is disabled|
+              cacheinfo: Unable to detect cache hierarchy for CPU 0|
+              ufshcd-rockchip 2a2d0000.ufshc: .*|
+              host_regs: 000000[0-9]0: .*|
+              rockchip-i2s-tdm .*: using zero-initialized flat cache, this may cause unexpected behavior|
+              rockchip-sai .*: using zero-initialized flat cache, this may cause unexpected behavior|
+              brcmfmac .*: Direct firmware load for brcm/brcmfmac43752-sdio.*.bin failed with error -2|
+              brcmfmac: brcmf_sdio_htclk: HT Avail timeout \(1000000\): clkctl 0x50|
+              rockchip-vop2 .*: failed to get clock [0-9]: -517|
+              DUMMY_TERMINATOR_ENTRY
+      timeout:
+        minutes: 10
+{{ /if }}
+{{ #if job.LAVA_TEST_FLUSTER }}
+  - test:
+      definitions:
+      - from: git
+        name: fluster
+        path: fluster/fluster.yaml
+        repository: https://gitlab.collabora.com/hardware-enablement/common/lava-test-definitions.git
+        revision: main
+        parameters:
+          TESTSUITE: {{ job.TESTSUITE }}
+          DECODERS: {{ job.DECODERS }}
+          SKIP_VECTORS: >
+            av1-1-b10-23-film_grain-50
+            av1-1-b8-01-size-16x16
+            av1-1-b8-01-size-16x18
+            av1-1-b8-01-size-16x32
+            av1-1-b8-01-size-16x34
+            av1-1-b8-01-size-16x64
+            av1-1-b8-01-size-16x66
+            av1-1-b8-01-size-18x16
+            av1-1-b8-01-size-18x18
+            av1-1-b8-01-size-18x32
+            av1-1-b8-01-size-18x34
+            av1-1-b8-01-size-18x64
+            av1-1-b8-01-size-18x66
+            av1-1-b8-01-size-32x16
+            av1-1-b8-01-size-32x18
+            av1-1-b8-01-size-32x32
+            av1-1-b8-01-size-32x34
+            av1-1-b8-01-size-32x64
+            av1-1-b8-01-size-32x66
+            av1-1-b8-01-size-34x16
+            av1-1-b8-01-size-34x18
+            av1-1-b8-01-size-34x32
+            av1-1-b8-01-size-34x34
+            av1-1-b8-01-size-34x64
+            av1-1-b8-01-size-34x66
+            av1-1-b8-01-size-64x16
+            av1-1-b8-01-size-64x32
+            av1-1-b8-01-size-64x64
+            av1-1-b8-01-size-64x66
+            av1-1-b8-01-size-66x16
+            av1-1-b8-01-size-66x18
+            av1-1-b8-01-size-66x32
+            av1-1-b8-01-size-66x64
+            av1-1-b8-23-film_grain-50
+
+            CVFC1_Sony_C
+            FM1_BT_B
+            FM1_FT_E
+            FM2_SVA_C
+            MR8_BT_B
+            SP1_BT_A
+            sp2_bt_b
+            CVFI2_SVA_C
+            CVMAPAQP3_Sony_E
+            CVMAQP2_Sony_G
+            CVMAQP3_Sony_D
+            CVMA1_TOSHIBA_B
+            CVMANL1_TOSHIBA_B
+            CI1_FT_B
+            CVBS3_Sony_C
+            CVMANL2_TOSHIBA_B
+            CVNLFI1_Sony_C
+            CVPCMNL2_SVA_C
+            CVPCMNL1_SVA_C
+            CVMP_MOT_FRM_L31_B
+            CVNLFI2_Sony_H
+            CVMP_MOT_FLD_L30_B
+            CVPA1_TOSHIBA_B
+            CVWP1_TOSHIBA_E
+            CVWP3_TOSHIBA_E
+            CVWP2_TOSHIBA_E
+            CVWP5_TOSHIBA_E
+            FI1_Sony_E
+            CVSEFDFT3_Sony_E
+            CVSE2_Sony_B
+            CVSE3_Sony_H
+            MIDR_MW_D
+            MR1_BT_A
+            MPS_MW_A
+            HCBP1_HHI_A
+            HCBP2_HHI_A
+            HCMP1_HHI_A
+            MR1_MW_A
+            MR7_BT_B
+            MR8_BT_B
+            MR6_BT_B
+            MR2_MW_A
+            MR9_BT_B
+            NL1_Sony_D
+            MR2_TANDBERG_E
+            NL3_SVA_E
+            MR5_TANDBERG_C
+            NLMQ1_JVC_C
+            MR3_TANDBERG_B
+            NLMQ2_JVC_C
+            MR4_TANDBERG_C
+            Sharp_MP_Field_1_B
+            Sharp_MP_Field_2_B
+            NRF_MW_E
+            Sharp_MP_Field_3_B
+            Sharp_MP_PAFF_1r2
+            Sharp_MP_PAFF_2r
+            SL1_SVA_B
+            SVA_Base_B
+            SVA_BA1_B
+            SVA_BA2_D
+            NL2_Sony_H
+            SVA_NL2_E
+            SVA_CL1_E
+            SVA_FM1_E
+            SVA_NL1_B
+            MV1_BRCM_D
+            LS_SVA_D
+      timeout:
+        minutes: 10
+{{ /if }}
+{{ #if job.LAVA_TEST_KSELFTEST_DT }}
+  - test:
+      definitions:
+      - from: git
+        name: kselftest-dt
+        parameters:
+          ENV: ''
+          SKIPFILE: /dev/null
+          SKIP_INSTALL: true
+          TESTPROG_URL: "{{job.CI_PROJECT_URL}}/-/jobs/%%KSELFTEST_BUILD_JOB%%/artifacts/raw/artifacts/kselftest.tar.gz"
+          TST_CASENAME: ''
+          TST_CMDFILES: dt
+        path: automated/linux/kselftest/kselftest.yaml
+        repository: https://github.com/kernelci/test-definitions.git
+        revision: kernelci.org
+      timeout:
+        minutes: 10
+{{ /if }}
+{{ #if job.LAVA_TEST_WATCHDOG }}
+  - test:
+      timeout:
+        minutes: 5
+      interactive:
+      - name: wdt-reset
+        prompts: ['root@rk3588-ci:(.*)#']
+        script:
+        - name: wdt-get-timeout
+          command: "wdt_timeout=$(cat /sys/class/watchdog/watchdog0/timeout)"
+          wait_for_prompt: true
+          failures:
+          - message: "cat: /sys/class/watchdog/watchdog\\d+/timeout: No such file or directory"
+            exception: JobError
+        - name: wdt-trigger-reset
+          command: "sleep $((wdt_timeout + 5)) > /dev/watchdog0"
+          wait_for_prompt: false
+          successes:
+          - message: U-Boot
+{{ /if }}
+{{ #if job.LAVA_TEST_RTCWAKE }}
+  - test:
+      definitions:
+      - from: git
+        name: rtcwake
+        parameters:
+          ITERATIONS: 3
+          SECONDS: 120
+          DELTA: 70
+        path: rtcwake/rtcwake.yaml
+        repository: https://gitlab.collabora.com/hardware-enablement/common/lava-test-definitions.git
+        revision: main
+      timeout:
+        minutes: 10
+{{ /if }}
+{{ #if job.LAVA_TEST_PM_TEST_SUSPEND }}
+  - test:
+      timeout:
+        minutes: 5
+      interactive:
+      - name: pm-test-suspend
+        prompts: ['root@rk3588-ci:(.*)#']
+        script:
+        - name: keep-console-enabled
+          command: "echo N > /sys/module/printk/parameters/console_suspend"
+          wait_for_prompt: true
+        - name: print-pm-times
+          command: "echo 1 > /sys/power/pm_print_times"
+          wait_for_prompt: true
+        - name: print-pm-debug-messages
+          command: "echo 1 > /sys/power/pm_debug_messages"
+          wait_for_prompt: true
+        - name: do-pm-test
+          command: "echo core > /sys/power/pm_test"
+          wait_for_prompt: true
+        - name: suspend-for-5s
+          command: "echo mem > /sys/power/state"
+          wait_for_prompt: true
+{{ /if }}
+{{ #if job.LAVA_TEST_PM_TEST_SUSPEND_DEEP }}
+  - test:
+      timeout:
+        minutes: 5
+      interactive:
+      - name: pm-test-suspend-deep
+        prompts: ['root@rk3588-ci:(.*)#']
+        script:
+        - name: keep-console-enabled
+          command: "echo N > /sys/module/printk/parameters/console_suspend"
+          wait_for_prompt: true
+        - name: print-pm-times
+          command: "echo 1 > /sys/power/pm_print_times"
+          wait_for_prompt: true
+        - name: print-pm-debug-messages
+          command: "echo 1 > /sys/power/pm_debug_messages"
+          wait_for_prompt: true
+        - name: do-pm-test
+          command: "echo none > /sys/power/pm_test"
+          wait_for_prompt: true
+        - name: suspend-for-120s
+          command: "rtcwake -m mem -s 120"
+          wait_for_prompt: true
+{{ /if }}

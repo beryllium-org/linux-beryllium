@@ -8,6 +8,7 @@
 struct drm_connector;
 struct drm_connector_state;
 struct drm_display_mode;
+struct drm_modeset_acquire_ctx;
 enum drm_output_color_format;
 
 void
@@ -35,4 +36,27 @@ drm_hdmi_acr_get_n_cts(unsigned long long tmds_char_rate,
 		       unsigned int *out_n,
 		       unsigned int *out_cts);
 
+void
+drm_hdmi_acr_get_frl_n_cts(unsigned int frl_rate_per_lane,
+			   unsigned int sample_rate,
+			   unsigned int *out_n,
+			   unsigned int *out_cts);
+
+bool
+drm_hdmi_mode_needs_scrambling(const struct drm_display_mode *mode,
+			       unsigned int bpc, enum drm_output_color_format fmt);
+
+int
+drm_connector_hdmi_enable_scrambling(struct drm_connector *connector,
+				     const struct drm_connector_state *conn_state);
+int
+drm_connector_hdmi_disable_scrambling(struct drm_connector *connector);
+
+int
+drm_connector_hdmi_sync_scdc(struct drm_connector *connector, bool plugged,
+			     struct drm_modeset_acquire_ctx *ctx);
+
+int drm_connector_hdmi_enable_frl(struct drm_connector *connector,
+				  const struct drm_connector_state *conn_state);
+int drm_connector_hdmi_disable_frl(struct drm_connector *connector);
 #endif
