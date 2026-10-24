@@ -1331,7 +1331,17 @@ static void pbus_size_mem(struct pci_bus *bus, struct resource *b_res,
 				continue;
 
 			r_size = resource_size(r);
-			size += max(r_size, align);
+			/*
+			 * A resource larger than its alignment whose size is
+			 * not a multiple of that alignment (typically a bridge
+			 * window, e.g. 256M BAR + 32M BAR behind a switch
+			 * downstream port) cannot be packed back-to-back with
+			 * a sibling of the same kind: the next one's aligned
+			 * part must start on the next alignment boundary.
+			 * Account the rounded-up size so the parent window is
+			 * large enough, as kernels before v7.0 effectively did.
+			 */
+			size += ALIGN(max(r_size, align), align);
 
 			/*
 			 * If resource's size is larger than its alignment,
