@@ -26,7 +26,6 @@
 	aliases {
 		mmc0 = &sdhci;
 		mmc1 = &sdmmc;
-		mmc2 = &sdio;
 	};
 
 	adc-keys {
@@ -125,14 +124,20 @@
 		};
 	};
 
-	sdio_pwrseq: sdio-pwrseq {
-		compatible = "mmc-pwrseq-simple";
-		clock-names = "ext_clock";
-		clocks = <&rtc_hym8563>;
-		pinctrl-0 = <&wifi_enable_h>;
+	/*
+	 * Wi-Fi (AP6275P) sits on pcie2x1l2 per the EDK2 firmware; this
+	 * regulator is the module's WIFI_REG_ON power enable (gpio0 C7).
+	 */
+	vcc3v3_wlan: regulator-vcc3v3-wlan {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc3v3_wlan";
+		enable-active-high;
+		gpio = <&gpio0 RK_PC7 GPIO_ACTIVE_HIGH>;
 		pinctrl-names = "default";
-		post-power-on-delay-ms = <200>;
-		reset-gpios = <&gpio0 RK_PC7 GPIO_ACTIVE_LOW>;
+		pinctrl-0 = <&wifi_poweren>;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		startup-delay-us = <5000>;
 	};
 
 	sound {
@@ -154,8 +159,9 @@
 	 * Board input power comes from the battery through the SC8886 charger.
 	 * Upstream has no SC8886 driver yet; until that lands, describe the
 	 * main input rail as an always-on fixed supply so the PMIC tree has a
-	 * root. TODO: replace with the real charger regulator once sc8886 is
-	 * ported.
+	 * root. The 5V rail switch (gpio4 A2) is confirmed by the EDK2
+	 * firmware, which drives it during early init. TODO: replace with the
+	 * real charger regulator once sc8886 is ported.
 	 */
 	vcc5v0_sys: regulator-vcc5v0-sys {
 		compatible = "regulator-fixed";
@@ -164,6 +170,10 @@
 		regulator-boot-on;
 		regulator-min-microvolt = <5000000>;
 		regulator-max-microvolt = <5000000>;
+		enable-active-high;
+		gpio = <&gpio4 RK_PA2 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&vcc5v0_en>;
 	};
 
 	vcc_1v1_nldo_s3: regulator-vcc-1v1-nldo-s3 {
@@ -494,9 +504,35 @@
 		};
 	};
 
+	bluetooth-pins {
+		bt_reset: bt-reset {
+			rockchip,pins = <0 RK_PD4 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		bt_wake_dev: bt-wake-dev {
+			rockchip,pins = <0 RK_PC6 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		bt_wake_host: bt-wake-host {
+			rockchip,pins = <0 RK_PC5 RK_FUNC_GPIO &pcfg_pull_down>;
+		};
+	};
+
 	wifi {
-		wifi_enable_h: wifi-enable-h {
+		wifi_poweren: wifi-poweren {
 			rockchip,pins = <0 RK_PC7 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	pcie {
+		pcie_rst: pcie-rst {
+			rockchip,pins = <3 RK_PD1 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	12c-power {
+		vcc5v0_en: vcc5v0-en {
+			rockchip,pins = <4 RK_PA2 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
 
@@ -544,22 +580,11 @@
 	status = "okay";
 };
 
-&sdio {
-	#address-cells = <1>;
-	#size-cells = <0>;
-	bus-width = <4>;
-	cap-sd-highspeed;
-	cap-sdio-irq;
-	disable-wp;
-	keep-power-in-suspend;
-	max-frequency = <100000000>;
-	mmc-pwrseq = <&sdio_pwrseq>;
-	no-mmc;
-	no-sd;
-	non-removable;
-	sd-uhs-sdr104;
-	vmmc-supply = <&vcc_3v3_s3>;
-	vqmmc-supply = <&vcc_1v8_s3>;
+&pcie2x1l2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie_rst>;
+	reset-gpios = <&gpio3 RK_PD1 GPIO_ACTIVE_HIGH>;
+	vpcie3v3-supply = <&vcc3v3_wlan>;
 	status = "okay";
 };
 
@@ -876,6 +901,28 @@
 	status = "okay";
 };
 
+&uart9 {
+	pinctrl-0 = <&uart9m2_xfer>, <&uart9m2_ctsn>, <&uart9m2_rtsn>;
+	pinctrl-names = "default";
+	uart-has-rtscts;
+	status = "okay";
+
+	bluetooth {
+		/*
+		 * AP6275P module BT side (Broadcom). Upstream has no
+		 * bcm4389 entry; bcm4349-bt is the closest match, verify
+		 * behaviour on hardware.
+		 */
+		compatible = "brcm,bcm4349-bt";
+		clocks = <&rtc_hym8563>;
+		device-wake-gpios = <&gpio0 RK_PC6 GPIO_ACTIVE_HIGH>;
+		enable-gpios = <&gpio0 RK_PD4 GPIO_ACTIVE_HIGH>;
+		host-wake-gpios = <&gpio0 RK_PC5 GPIO_ACTIVE_HIGH>;
+		pinctrl-0 = <&bt_reset>, <&bt_wake_dev>, <&bt_wake_host>;
+		pinctrl-names = "default";
+	};
+};
+
 &u2phy0_otg {
 	status = "okay";
 };
@@ -928,13 +975,15 @@
 
 /*
  * TODO, next porting steps (no upstream driver exists yet on 7.3):
- *  - panel driver for "pnc,pnc357db1" (init sequence from the vendor tree)
+ *  - DSC support in dw-mipi-dsi2 / dw-mipi-dsi2-rockchip (the only blocker
+ *    for the display; reference: EDK2 DisplayLib + rkr3 vendor dsi2 driver)
  *  - HUSB311 USB-C PD controller (i2c6 @0x4e) + usb-c-connector + DP altmode
  *  - SC8886 charger (i2c6 @0x6b, replaces the vcc5v0_sys placeholder)
  *  - HIMAX HX83121 touchscreen (i2c4 @0x48, reset gpio1 B4, irq gpio1 B5)
- *  - AP6275P bluetooth on uart9 (BT power gpio0 D4, wake gpio0 C6/C5)
- *  - LTE modem power sequencing (gpio3 A0/A1/A4/A5) + pcie2x1l2
- *    (reset gpio3 D1) for the modem slot
+ *  - LTE modem power sequencing (gpio3 A0/A1/A4/A5), no pcie consumer yet
  *  - fingerprint reader on spi3 (vendor microarray driver)
- *  - PDM mic array on pdm1
+ *  - headphone jack detect (gpio1 C0) and speaker amp enable (gpio4 A5)
+ *    are currently unmodeled; EDK2 drives both.
+ *  - PDM mic array on pdm1 (no pdm node upstream in rk3588 dtsi yet;
+ *    vendor wiring: pdm1m1_clk1 + pdm1m1_sdi3, path-map 3 2 1 0)
  */
