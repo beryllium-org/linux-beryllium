@@ -820,7 +820,8 @@ config CHARGER_BQ257XX
 	depends on MFD_BQ257XX
 	help
 	  Say Y to enable support for the TI BQ257XX family of battery
-	  charging integrated circuits.
+	  charging integrated circuits, as well as the Southchip SC8886
+	  (register-compatible with the TI BQ25703A).
 
 config CHARGER_BQ25890
 	tristate "TI BQ25890 battery charger driver"

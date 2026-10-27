@@ -16,6 +16,7 @@
 #include <dt-bindings/pinctrl/rockchip.h>
 #include <dt-bindings/pwm/pwm.h>
 #include <dt-bindings/soc/rockchip,vop2.h>
+#include <dt-bindings/usb/pd.h>
 #include "rk3588s.dtsi"
 
 / {
@@ -379,6 +380,24 @@
 	};
 };
 
+&i2c4 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c4m3_xfer>;
+	status = "okay";
+
+	touchscreen@48 {
+		compatible = "himax,hx83121a";
+		reg = <0x48>;
+		interrupt-parent = <&gpio1>;
+		interrupts = <RK_PB5 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&touch_int &touch_rst>;
+		reset-gpios = <&gpio1 RK_PB4 GPIO_ACTIVE_LOW>;
+		touchscreen-size-x = <1600>;
+		touchscreen-size-y = <2560>;
+	};
+};
+
 &i2c5 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c5m3_xfer>;
@@ -397,6 +416,87 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c6m3_xfer>;
 	status = "okay";
+
+	usbc0: usb-tc@4e {
+		compatible = "hynetek,husb311";
+		reg = <0x4e>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PC4 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&usbc0_int>;
+		vbus-supply = <&vbus5v0_typec>;
+		wakeup-source;
+
+		usb_con: connector {
+			compatible = "usb-c-connector";
+			data-role = "dual";
+			label = "USB-C";
+			power-role = "dual";
+			try-power-role = "sink";
+			op-sink-microwatt = <1000000>;
+			sink-pdos =
+				<PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)
+				 PDO_FIXED(9000, 3000, PDO_FIXED_USB_COMM)
+				 PDO_FIXED(20000, 2500, PDO_FIXED_USB_COMM)>;
+			source-pdos =
+				<PDO_FIXED(5000, 3000, PDO_FIXED_USB_COMM)>;
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					usbc0_hs: endpoint {
+						remote-endpoint =
+							<&usb_host0_xhci_hs>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+					usbc0_ss: endpoint {
+						remote-endpoint =
+							<&usbdp_phy0_ss_out>;
+					};
+				};
+			};
+		};
+	};
+
+	/*
+	 * SC8886 charger (register-compatible with the TI BQ25703A).
+	 * Battery limits are from the vendor tree; verify on hardware.
+	 * The vbus regulator sources the USB-C VBUS path (gpio4 A6 is
+	 * the OTG/charge direction enable).
+	 */
+	sc8886: charger@6b {
+		compatible = "southchip,sc8886";
+		reg = <0x6b>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PD5 IRQ_TYPE_LEVEL_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&charger_int>;
+		power-supplies = <&usb_con>;
+
+		battery {
+			constant-charge-current-max-microamp = <2500000>;
+			constant-charge-voltage-max-microvolt = <13200000>;
+			voltage-min-design-microvolt = <3200000>;
+		};
+
+		regulators {
+			vbus5v0_typec: vbus {
+				regulator-name = "vbus5v0_typec";
+				regulator-min-microvolt = <5000000>;
+				regulator-max-microvolt = <5000000>;
+				enable-active-high;
+				enable-gpios = <&gpio4 RK_PA6 GPIO_ACTIVE_HIGH>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&charger_otg_en>;
+			};
+		};
+	};
 
 	rtc_hym8563: rtc@51 {
 		compatible = "haoyu,hym8563";
@@ -533,6 +633,32 @@
 	12c-power {
 		vcc5v0_en: vcc5v0-en {
 			rockchip,pins = <4 RK_PA2 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	usb-typec {
+		usbc0_int: usbc0-int {
+			rockchip,pins = <0 RK_PC4 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	charger {
+		charger_int: charger-int {
+			rockchip,pins = <0 RK_PD5 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+
+		charger_otg_en: charger-otg-en {
+			rockchip,pins = <4 RK_PA6 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	touch {
+		touch_int: touch-int {
+			rockchip,pins = <1 RK_PB5 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+
+		touch_rst: touch-rst {
+			rockchip,pins = <1 RK_PB4 RK_FUNC_GPIO &pcfg_pull_none>;
 		};
 	};
 
@@ -952,7 +1078,50 @@
 };
 
 &usb_host0_xhci {
+	usb-role-switch;
 	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+			usb_host0_xhci_hs: endpoint {
+				remote-endpoint = <&usbc0_hs>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+			usb_host0_xhci_ss: endpoint {
+				remote-endpoint = <&usbdp_phy0_ss_in>;
+			};
+		};
+	};
+};
+
+&usbdp_phy0 {
+	mode-switch;
+	orientation-switch;
+	sbu1-dc-gpios = <&gpio4 RK_PA0 GPIO_ACTIVE_HIGH>;
+	sbu2-dc-gpios = <&gpio4 RK_PA1 GPIO_ACTIVE_HIGH>;
+	status = "okay";
+
+	port {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		usbdp_phy0_ss_out: endpoint@0 {
+			reg = <0>;
+			remote-endpoint = <&usbc0_ss>;
+		};
+
+		usbdp_phy0_ss_in: endpoint@1 {
+			reg = <1>;
+			remote-endpoint = <&usb_host0_xhci_ss>;
+		};
+	};
 };
 
 &vop {
@@ -977,9 +1146,8 @@
  * TODO, next porting steps (no upstream driver exists yet on 7.3):
  *  - DSC support in dw-mipi-dsi2 / dw-mipi-dsi2-rockchip (the only blocker
  *    for the display; reference: EDK2 DisplayLib + rkr3 vendor dsi2 driver)
- *  - HUSB311 USB-C PD controller (i2c6 @0x4e) + usb-c-connector + DP altmode
- *  - SC8886 charger (i2c6 @0x6b, replaces the vcc5v0_sys placeholder)
- *  - HIMAX HX83121 touchscreen (i2c4 @0x48, reset gpio1 B4, irq gpio1 B5)
+ *  - USB-C DP altmode: the connector graph has no displayport altmode yet
+ *    (needs usbdp_phy0_dp endpoints + dp0 wiring once DP bringup works)
  *  - LTE modem power sequencing (gpio3 A0/A1/A4/A5), no pcie consumer yet
  *  - fingerprint reader on spi3 (vendor microarray driver)
  *  - headphone jack detect (gpio1 C0) and speaker amp enable (gpio4 A5)
