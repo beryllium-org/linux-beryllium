@@ -96,7 +96,21 @@
 #define BQ25703_ADC_VSYS_EN			BIT(1)
 #define BQ25703_ADC_VBAT_EN			BIT(0)
 
-#define BQ25703_EN_OTG_MASK			BIT(12)
+#define BQ25703_EN_OTG_MASK		BIT(12)
+
+/*
+ * Southchip SC8886: pin- and register-compatible with the BQ25703A.
+ * The OTG voltage field, however, uses a coarser 128mV step starting
+ * from 1.28V (VOTG = 1.28V + reg[13:6] * 128mV), and the hardware
+ * ignores settings below 4.28V, so only settings from register 25
+ * (4.48V) upward are exposed to userspace.
+ */
+#define SC8886_OTG_VOLT_STEP_UV		128000
+#define SC8886_OTG_VOLT_MIN_REG		25
+#define SC8886_OTG_VOLT_MIN_UV		4480000
+#define SC8886_OTG_VOLT_MAX_UV		20736000
+#define SC8886_OTG_VOLT_NUM_VOLT	((SC8886_OTG_VOLT_MAX_UV - SC8886_OTG_VOLT_MIN_UV) / \
+					 SC8886_OTG_VOLT_STEP_UV + 1)
 
 #define BQ25792_REG00_MIN_SYS_VOLTAGE		0x00
 #define BQ25792_REG01_CHARGE_VOLTAGE_LIMIT	0x01
@@ -521,6 +535,7 @@
 enum bq257xx_type {
 	BQ25703A = 1,
 	BQ25792,
+	SC8886,
 };
 
 struct bq257xx_device {

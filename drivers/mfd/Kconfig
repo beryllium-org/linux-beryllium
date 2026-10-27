@@ -1698,9 +1698,10 @@ config MFD_BQ257XX
 	select REGMAP_I2C
 	help
 	  Support Texas Instruments BQ25703 Buck/Boost converter with
-	  charge controller. It consists of regulators that provide
-	  system voltage and OTG voltage, and a charger manager for
-	  batteries containing one or more cells.
+	  charge controller, and the Southchip SC8886, which is
+	  register-compatible with it. It consists of regulators that
+	  provide system voltage and OTG voltage, and a charger manager
+	  for batteries containing one or more cells.
 
 config MFD_OMAP_USB_HOST
 	bool "TI OMAP USBHS core and TLL driver"

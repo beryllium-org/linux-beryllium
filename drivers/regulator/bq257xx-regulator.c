@@ -102,6 +102,30 @@ static const struct regulator_desc bq25703_vbus_desc = {
 	.vsel_mask = BQ25703_OTG_VOLT_MASK,
 };
 
+/*
+ * The SC8886 encodes the OTG voltage with a 128mV step starting at
+ * 1.28V, unlike the BQ25703A (64mV step at 4.48V). Settings below
+ * 4.28V are ignored by the hardware, so only register values from
+ * SC8886_OTG_VOLT_MIN_REG upward are listed.
+ */
+static const struct regulator_desc sc8886_vbus_desc = {
+	.name = "vbus",
+	.of_match = of_match_ptr("vbus"),
+	.regulators_node = of_match_ptr("regulators"),
+	.type = REGULATOR_VOLTAGE,
+	.owner = THIS_MODULE,
+	.ops = &bq25703_vbus_ops,
+	.min_uV = SC8886_OTG_VOLT_MIN_UV,
+	.uV_step = SC8886_OTG_VOLT_STEP_UV,
+	.n_voltages = SC8886_OTG_VOLT_NUM_VOLT,
+	.enable_mask = BQ25703_EN_OTG_MASK,
+	.enable_reg = BQ25703_CHARGE_OPTION_3,
+	.enable_val = BQ25703_EN_OTG_MASK,
+	.disable_val = 0,
+	.vsel_reg = BQ25703_OTG_VOLT,
+	.vsel_mask = BQ25703_OTG_VOLT_MASK,
+};
+
 /* Get optional GPIO for OTG regulator enable. */
 static void bq257xx_reg_dt_parse_gpio(struct platform_device *pdev)
 {
@@ -142,6 +166,7 @@ static void bq257xx_reg_dt_parse_gpio(struct platform_device *pdev)
 static int bq257xx_regulator_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct bq257xx_device *bq = dev_get_drvdata(dev->parent);
 	struct bq257xx_reg_data *pdata;
 	struct regulator_config cfg = {};
 
@@ -151,7 +176,15 @@ static int bq257xx_regulator_probe(struct platform_device *pdev)
 	if (!pdata)
 		return -ENOMEM;
 
-	pdata->desc = bq25703_vbus_desc;
+	switch (bq->type) {
+	case BQ25703A:
+	case BQ25792:
+		pdata->desc = bq25703_vbus_desc;
+		break;
+	case SC8886:
+		pdata->desc = sc8886_vbus_desc;
+		break;
+	}
 
 	platform_set_drvdata(pdev, pdata);
 	bq257xx_reg_dt_parse_gpio(pdev);

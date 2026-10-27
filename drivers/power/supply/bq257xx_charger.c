@@ -1234,6 +1234,7 @@ static int bq257xx_charger_probe(struct platform_device *pdev)
 
 	switch (bq->type) {
 	case BQ25703A:
+	case SC8886:
 		pdata->chip = &bq25703_chip_info;
 		break;
 	case BQ25792:
