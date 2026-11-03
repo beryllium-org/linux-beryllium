@@ -19,6 +19,7 @@
 
 #include "panthor_device.h"
 #include "panthor_gpu.h"
+#include "panthor_sky1.h"
 #include "panthor_gpu_regs.h"
 #include "panthor_hw.h"
 
@@ -59,8 +60,16 @@ struct panthor_gpu {
 
 static void panthor_gpu_coherency_set(struct panthor_device *ptdev)
 {
-	gpu_write(ptdev->gpu->iomem, GPU_COHERENCY_PROTOCOL,
-		  ptdev->gpu_info.selected_coherency);
+	u32 val = ptdev->coherency_mode;
+
+	if (val != PANTHOR_COHERENCY_NONE) {
+		u32 features = gpu_read(ptdev->gpu->iomem, GPU_COHERENCY_FEATURES);
+
+		if (features & GPU_COHERENCY_SHAREABLE_CACHE)
+			val |= GPU_COHERENCY_SHAREABLE_CACHE;
+	}
+
+	gpu_write(ptdev->gpu->iomem, GPU_COHERENCY_PROTOCOL, val);
 }
 
 static void panthor_gpu_l2_config_set(struct panthor_device *ptdev)
@@ -165,7 +174,10 @@ int panthor_gpu_init(struct panthor_device *ptdev)
 	if (ret)
 		return ret;
 
-	irq = platform_get_irq_byname(to_platform_device(ptdev->base.dev), "gpu");
+	if (has_acpi_companion(ptdev->base.dev))
+		irq = platform_get_irq(to_platform_device(ptdev->base.dev), 2);
+	else
+			irq = platform_get_irq_byname(to_platform_device(ptdev->base.dev), "gpu");
 	if (irq < 0)
 		return irq;
 
@@ -461,23 +473,48 @@ int panthor_gpu_coherency_init(struct panthor_device *ptdev)
 	BUILD_BUG_ON(GPU_COHERENCY_NONE != DRM_PANTHOR_GPU_COHERENCY_NONE);
 	BUILD_BUG_ON(GPU_COHERENCY_ACE_LITE != DRM_PANTHOR_GPU_COHERENCY_ACE_LITE);
 	BUILD_BUG_ON(GPU_COHERENCY_ACE != DRM_PANTHOR_GPU_COHERENCY_ACE);
+	bool dma_coherent = device_get_dma_attr(ptdev->base.dev) == DEV_DMA_COHERENT;
 
-	/* Start with no coherency, and update it if the device is flagged coherent. */
-	ptdev->gpu_info.selected_coherency = GPU_COHERENCY_NONE;
-	ptdev->coherent = device_get_dma_attr(ptdev->base.dev) == DEV_DMA_COHERENT;
-
-	if (!ptdev->coherent)
-		return 0;
-
-	/* Check if the ACE-Lite coherency protocol is actually supported by the GPU.
-	 * ACE protocol has never been supported for command stream frontend GPUs.
+	/*
+	 * Sky1 SoC: The GPU hardware supports full ACE (128/256-bit AMBA 4
+	 * ACE master), but the platform uses ACE-Lite (DT system-coherency=0).
+	 * The DPU is non-snooping and reads from SLC/DRAM, so ACE-Lite is the
+	 * correct choice: GPU L2 evictions route through HN-F and are absorbed
+	 * into the SLC, making WB data visible to the DPU without NC memattr.
 	 */
-	if ((gpu_read(ptdev->gpu->iomem, GPU_COHERENCY_FEATURES) &
-		      GPU_COHERENCY_PROT_BIT(ACE_LITE))) {
-		ptdev->gpu_info.selected_coherency = GPU_COHERENCY_ACE_LITE;
-		return 0;
+	if (panthor_is_sky1(ptdev)) {
+		ptdev->coherency_mode = PANTHOR_COHERENCY_ACE_LITE;
+		drm_info(&ptdev->base, "Using ACE-Lite bus coherency (Sky1)\n");
+	} else if (!dma_coherent) {
+		ptdev->coherency_mode = PANTHOR_COHERENCY_NONE;
+	} else {
+		ptdev->coherency_mode = PANTHOR_COHERENCY_ACE_LITE;
 	}
 
-	drm_err(&ptdev->base, "Coherency not supported by the device");
+	/* Reflect the selected mode in the GPU_INFO uAPI query. */
+	switch (ptdev->coherency_mode) {
+	case PANTHOR_COHERENCY_ACE_LITE:
+		ptdev->gpu_info.selected_coherency =
+			DRM_PANTHOR_GPU_COHERENCY_ACE_LITE;
+		break;
+	case PANTHOR_COHERENCY_ACE:
+		ptdev->gpu_info.selected_coherency =
+			DRM_PANTHOR_GPU_COHERENCY_ACE;
+		break;
+	case PANTHOR_COHERENCY_NONE:
+		ptdev->gpu_info.selected_coherency =
+			DRM_PANTHOR_GPU_COHERENCY_NONE;
+		break;
+	}
+
+	if (ptdev->coherency_mode == PANTHOR_COHERENCY_NONE)
+		return 0;
+
+	/* Verify hardware supports the selected protocol. */
+	if (gpu_read(ptdev->gpu->iomem, GPU_COHERENCY_FEATURES) &
+	    GPU_COHERENCY_PROT_BIT(ACE_LITE))
+		return 0;
+
+	drm_err(&ptdev->base, "ACE-Lite not supported by hardware");
 	return -ENOTSUPP;
 }

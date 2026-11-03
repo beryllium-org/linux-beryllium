@@ -26,20 +26,38 @@
 #include "panthor_mmu.h"
 #include "panthor_pwr.h"
 #include "panthor_sched.h"
+#include "panthor_sky1.h"
 
 static int panthor_clk_init(struct panthor_device *ptdev)
 {
-	ptdev->clks.core = devm_clk_get(ptdev->base.dev, NULL);
-	if (IS_ERR(ptdev->clks.core))
-		return dev_err_probe(ptdev->base.dev,
-				     PTR_ERR(ptdev->clks.core),
-				     "get 'core' clock failed");
+	if (panthor_is_sky1(ptdev)) {
+		/* Sky1 (ACPI) exposes clocks under vendor names. */
+		ptdev->clks.core = devm_clk_get(ptdev->base.dev, "gpu_clk_core");
+		if (IS_ERR(ptdev->clks.core))
+			return dev_err_probe(ptdev->base.dev,
+					     PTR_ERR(ptdev->clks.core),
+					     "get 'gpu_clk_core' clock failed");
 
-	ptdev->clks.stacks = devm_clk_get_optional(ptdev->base.dev, "stacks");
-	if (IS_ERR(ptdev->clks.stacks))
-		return dev_err_probe(ptdev->base.dev,
-				     PTR_ERR(ptdev->clks.stacks),
-				     "get 'stacks' clock failed");
+		ptdev->clks.stacks = devm_clk_get_optional(ptdev->base.dev,
+							   "gpu_clk_stacks");
+		if (IS_ERR(ptdev->clks.stacks))
+			return dev_err_probe(ptdev->base.dev,
+					     PTR_ERR(ptdev->clks.stacks),
+					     "get 'gpu_clk_stacks' clock failed");
+	} else {
+		/* Mainline: unnamed core clock + optional stacks. */
+		ptdev->clks.core = devm_clk_get(ptdev->base.dev, NULL);
+		if (IS_ERR(ptdev->clks.core))
+			return dev_err_probe(ptdev->base.dev,
+					     PTR_ERR(ptdev->clks.core),
+					     "get 'core' clock failed");
+
+		ptdev->clks.stacks = devm_clk_get_optional(ptdev->base.dev, "stacks");
+		if (IS_ERR(ptdev->clks.stacks))
+			return dev_err_probe(ptdev->base.dev,
+					     PTR_ERR(ptdev->clks.stacks),
+					     "get 'stacks' clock failed");
+	}
 
 	ptdev->clks.coregroup = devm_clk_get_optional(ptdev->base.dev, "coregroup");
 	if (IS_ERR(ptdev->clks.coregroup))
@@ -229,7 +247,10 @@ int panthor_device_init(struct panthor_device *ptdev)
 	if (ret)
 		return ret;
 
-	ret = panthor_init_power(ptdev->base.dev);
+	if (panthor_is_sky1(ptdev))
+		ret = sky1_gpu_power_on(ptdev);
+	else
+		ret = panthor_init_power(ptdev->base.dev);
 	if (ret < 0) {
 		drm_err(&ptdev->base, "init power domains failed, ret=%d", ret);
 		return ret;
@@ -239,10 +260,37 @@ int panthor_device_init(struct panthor_device *ptdev)
 	if (ret)
 		return ret;
 
-	ptdev->iomem = devm_platform_get_and_ioremap_resource(to_platform_device(ptdev->base.dev),
-							      0, &res);
-	if (IS_ERR(ptdev->iomem))
-		return PTR_ERR(ptdev->iomem);
+	if (panthor_is_sky1(ptdev)) {
+		ret = sky1_resets_init(ptdev);
+		if (ret)
+			return ret;
+	}
+
+	/* Sky1 uses resource 0 for RCSU, resource 1 for GPU registers.
+	 * Other platforms use resource 0 for GPU registers.
+	 */
+	if (panthor_is_sky1(ptdev)) {
+		ptdev->iomem = devm_platform_get_and_ioremap_resource(
+				to_platform_device(ptdev->base.dev), 1, &res);
+		if (IS_ERR(ptdev->iomem)) {
+			ret = PTR_ERR(ptdev->iomem);
+			return ret;
+		}
+
+		ptdev->sky1_rcsu_reg = devm_platform_ioremap_resource(
+				to_platform_device(ptdev->base.dev), 0);
+		if (IS_ERR(ptdev->sky1_rcsu_reg)) {
+			ret = PTR_ERR(ptdev->sky1_rcsu_reg);
+			return ret;
+		}
+	} else {
+		ptdev->iomem = devm_platform_get_and_ioremap_resource(
+				to_platform_device(ptdev->base.dev), 0, &res);
+		if (IS_ERR(ptdev->iomem)) {
+			ret = PTR_ERR(ptdev->iomem);
+			return ret;
+		}
+	}
 
 	ptdev->phys_addr = res->start;
 
@@ -258,9 +306,17 @@ int panthor_device_init(struct panthor_device *ptdev)
 	if (!IS_ENABLED(CONFIG_PM)) {
 		ret = panthor_device_resume(ptdev->base.dev);
 		if (ret)
-			return ret;
+			goto err_rpm_put;
 	}
 
+	/*
+	 * Sky1 GPU power-on sequence (from CIX GPU Development Guide):
+	 * 1. Power domain on  (done in sky1_gpu_power_on)
+	 * 2. Clock enable      (panthor_device_resume, via pm_runtime)
+	 * 3. IP Reset assert   (panthor_device_resume -> sky1_hw_power_on)
+	 * 4. IP Reset de-assert (panthor_device_resume -> sky1_hw_power_on)
+	 * 5. Qchannel clock gating enable (panthor_device_resume -> sky1_hw_power_on)
+	 */
 	ret = panthor_hw_init(ptdev);
 	if (ret)
 		goto err_rpm_put;
@@ -521,6 +577,18 @@ int panthor_device_resume(struct device *dev)
 	if (ret)
 		goto err_disable_stacks_clk;
 
+	/*
+	 * Sky1 power-on sequence steps 3-5 (IP reset assert/deassert +
+	 * qchannel clock gating) run here, after the clocks are enabled, for
+	 * both probe (via runtime resume) and system resume (via
+	 * pm_runtime_force_resume). Running them with the clocks gated (e.g.
+	 * from a noirq hook) would leave the reset synchronisers unclocked.
+	 * No-op on non-Sky1 platforms.
+	 */
+	ret = sky1_hw_power_on(ptdev);
+	if (ret)
+		goto err_disable_coregroup_clk;
+
 	panthor_devfreq_resume(ptdev);
 
 	if (panthor_device_is_initialized(ptdev) &&
@@ -563,6 +631,8 @@ int panthor_device_resume(struct device *dev)
 
 err_suspend_devfreq:
 	panthor_devfreq_suspend(ptdev);
+
+err_disable_coregroup_clk:
 	clk_disable_unprepare(ptdev->clks.coregroup);
 
 err_disable_stacks_clk:
@@ -624,4 +694,19 @@ int panthor_device_suspend(struct device *dev)
 	clk_disable_unprepare(ptdev->clks.bus);
 	atomic_set(&ptdev->pm.state, PANTHOR_DEVICE_PM_STATE_SUSPENDED);
 	return 0;
+}
+
+int panthor_device_suspend_noirq(struct device *dev)
+{
+	return pm_runtime_force_suspend(dev);
+}
+
+int panthor_device_resume_noirq(struct device *dev)
+{
+	/*
+	 * Sky1 reset/qchannel is done in panthor_device_resume(), after the
+	 * clocks are re-enabled by the runtime resume this triggers (see the
+	 * power-on sequence comment in panthor_device_init()).
+	 */
+	return pm_runtime_force_resume(dev);
 }

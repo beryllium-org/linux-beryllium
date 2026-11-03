@@ -115,5 +115,6 @@
 #define   GPU_COHERENCY_ACE_LITE			0
 #define   GPU_COHERENCY_ACE				1
 #define   GPU_COHERENCY_NONE				31
+#define   GPU_COHERENCY_SHAREABLE_CACHE			BIT(5)
 
 #endif /* __PANTHOR_GPU_REGS_H__ */

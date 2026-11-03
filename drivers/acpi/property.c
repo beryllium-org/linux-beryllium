@@ -1111,6 +1111,87 @@ int __acpi_node_get_property_reference(const struct fwnode_handle *fwnode,
 }
 EXPORT_SYMBOL_GPL(__acpi_node_get_property_reference);
 
+static int __acpi_count_property_reference_args(const struct fwnode_handle *fwnode,
+	const char *propname, const char *cells_name)
+{
+	const union acpi_object *element, *end;
+	const union acpi_object *obj;
+	const struct acpi_device_data *data;
+	struct fwnode_handle *ref_fwnode;
+	struct acpi_device *device;
+	int ret, idx = 0;
+
+	data = acpi_device_data_of_node(fwnode);
+	if (!data)
+		return -ENOENT;
+
+	ret = acpi_data_get_property(data, propname, ACPI_TYPE_ANY, &obj);
+	if (ret)
+		return ret == -EINVAL ? -ENOENT : -EINVAL;
+
+	switch (obj->type) {
+	case ACPI_TYPE_LOCAL_REFERENCE:
+		return 1;
+	case ACPI_TYPE_PACKAGE:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	element = obj->package.elements;
+	end = element + obj->package.count;
+
+	while (element < end) {
+		switch (element->type) {
+		case ACPI_TYPE_LOCAL_REFERENCE:
+			device = acpi_fetch_acpi_dev(element->reference.handle);
+			if (!device)
+				return -EINVAL;
+
+			element++;
+
+			ret = acpi_get_ref_args(NULL, acpi_fwnode_handle(device),
+						cells_name, &element, end,
+						NR_FWNODE_REFERENCE_ARGS);
+			if (ret < 0)
+				return ret;
+
+			idx++;
+			break;
+		case ACPI_TYPE_STRING:
+			ref_fwnode = acpi_parse_string_ref(fwnode,
+							   element->string.pointer);
+			if (!ref_fwnode)
+				return -EINVAL;
+
+			element++;
+
+			ret = acpi_get_ref_args(NULL, ref_fwnode, cells_name,
+						&element, end,
+						NR_FWNODE_REFERENCE_ARGS);
+			if (ret < 0)
+				return ret;
+
+			idx++;
+			break;
+		case ACPI_TYPE_INTEGER:
+			element++;
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	return idx;
+}
+
+int __acpi_node_count_property_reference(const struct fwnode_handle *fwnode,
+	const char *propname)
+{
+	return __acpi_count_property_reference_args(fwnode, propname, NULL);
+}
+EXPORT_SYMBOL_GPL(__acpi_node_count_property_reference);
+
 static int acpi_data_prop_read_single(const struct acpi_device_data *data,
 				      const char *propname,
 				      enum dev_prop_type proptype, void *val)
@@ -1654,6 +1735,14 @@ acpi_fwnode_property_read_string_array(const struct fwnode_handle *fwnode,
 				   val, nval);
 }
 
+static int
+acpi_fwnode_count_reference_with_args(const struct fwnode_handle *fwnode,
+		       const char *list_name, const char *cells_name)
+{
+	return __acpi_count_property_reference_args(fwnode, list_name,
+						   cells_name);
+}
+
 static const char *acpi_fwnode_get_name(const struct fwnode_handle *fwnode)
 {
 	const struct acpi_device *adev;
@@ -1761,6 +1850,7 @@ static int acpi_fwnode_irq_get(const struct fwnode_handle *fwnode,
 		.graph_get_port_parent = acpi_fwnode_get_parent,	\
 		.graph_parse_endpoint = acpi_fwnode_graph_parse_endpoint, \
 		.irq_get = acpi_fwnode_irq_get,				\
+		.property_count_reference_with_args = acpi_fwnode_count_reference_with_args, \
 	};								\
 	EXPORT_SYMBOL_GPL(ops)
 

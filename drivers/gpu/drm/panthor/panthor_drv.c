@@ -1821,6 +1821,7 @@ static int panthor_probe(struct platform_device *pdev)
 {
 	struct panthor_device *ptdev;
 
+	dev_pm_set_driver_flags(&pdev->dev, DPM_FLAG_NO_DIRECT_COMPLETE);
 	ptdev = devm_drm_dev_alloc(&pdev->dev, &panthor_drm_driver,
 				   struct panthor_device, base);
 	if (IS_ERR(ptdev))
@@ -1889,10 +1890,25 @@ static const struct of_device_id dt_match[] = {
 };
 MODULE_DEVICE_TABLE(of, dt_match);
 
-static DEFINE_RUNTIME_DEV_PM_OPS(panthor_pm_ops,
-				 panthor_device_suspend,
-				 panthor_device_resume,
-				 NULL);
+#ifdef CONFIG_ACPI
+static const struct acpi_device_id panthor_acpi_match[] = {
+	{ "CIXH5000", 0 },
+	{ }
+};
+MODULE_DEVICE_TABLE(acpi, panthor_acpi_match);
+#endif
+
+/*
+ * System sleep runs the force pair (see panthor_device_{suspend,resume}_noirq)
+ * in the process phase with the device IRQs enabled; Sky1 reset/qchannel now
+ * runs inside panthor_device_resume() after the clocks are enabled, reached
+ * via runtime resume from the force-resume.
+ */
+static const struct dev_pm_ops panthor_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(panthor_device_suspend_noirq,
+				panthor_device_resume_noirq)
+	RUNTIME_PM_OPS(panthor_device_suspend, panthor_device_resume, NULL)
+};
 
 static struct platform_driver panthor_driver = {
 	.probe = panthor_probe,
@@ -1901,6 +1917,7 @@ static struct platform_driver panthor_driver = {
 		.name = "panthor",
 		.pm = pm_ptr(&panthor_pm_ops),
 		.of_match_table = dt_match,
+		.acpi_match_table = ACPI_PTR(panthor_acpi_match),
 		.dev_groups = panthor_groups,
 	},
 };
