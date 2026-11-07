@@ -88,7 +88,7 @@ static bool smc_chan_available(struct fwnode_handle *fwnode, int idx)
 {
 	struct fwnode_handle *np __free(fwnode_handle) =
 					fwnode_find_reference(fwnode, "shmem", 0);
-	if (!np)
+	if (IS_ERR_OR_NULL(np))
 		return false;
 
 	return true;
