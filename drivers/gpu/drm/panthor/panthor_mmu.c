@@ -38,6 +38,7 @@
 #include "panthor_mmu.h"
 #include "panthor_mmu_regs.h"
 #include "panthor_sched.h"
+#include "panthor_sky1.h"
 
 #define MAX_AS_SLOTS			32
 
@@ -2174,7 +2175,7 @@ void panthor_vm_heaps_sizes(struct panthor_file *pfile, struct drm_memory_stats 
 }
 
 static u64 mair_to_memattr(u64 mair, enum panthor_coherency_mode mode,
-			   bool has_iommu)
+			   bool force_nc)
 {
 	u64 memattr = 0;
 	u32 i;
@@ -2192,12 +2193,11 @@ static u64 mair_to_memattr(u64 mair, enum panthor_coherency_mode mode,
 			out_attr = AS_MEMATTR_AARCH64_INNER_OUTER_NC |
 				   AS_MEMATTR_AARCH64_SH_MIDGARD_INNER |
 				   AS_MEMATTR_AARCH64_INNER_ALLOC_EXPL(false, false);
-		} else if (mode != PANTHOR_COHERENCY_ACE && !has_iommu) {
-			/* GPU not fully coherent and no IOMMU to override
-			 * memory attributes at the bus level. Even with
-			 * ACE-Lite, GPU L2 may not evict to SLC in time
-			 * for non-snooping masters like the DPU.
-			 * Force NC to guarantee DRAM visibility.
+		} else if (mode != PANTHOR_COHERENCY_ACE && force_nc) {
+			/* Sky1 without an IOMMU: even with ACE-Lite, GPU L2
+			 * may not evict to SLC in time for non-snooping masters
+			 * like the DPU. Force NC to guarantee DRAM visibility.
+			 * Other platforms retain the upstream cacheable mapping.
 			 */
 			out_attr = AS_MEMATTR_AARCH64_INNER_OUTER_NC |
 				   AS_MEMATTR_AARCH64_SH_MIDGARD_INNER |
@@ -2947,7 +2947,8 @@ panthor_vm_create(struct panthor_device *ptdev, bool for_mcu,
 
 	mair = io_pgtable_ops_to_pgtable(vm->pgtbl_ops)->cfg.arm_lpae_s1_cfg.mair;
 	vm->memattr = mair_to_memattr(mair, ptdev->coherency_mode,
-				      device_iommu_mapped(ptdev->base.dev));
+				      panthor_is_sky1(ptdev) &&
+				      !device_iommu_mapped(ptdev->base.dev));
 
 	mutex_lock(&ptdev->mmu->vm.lock);
 	list_add_tail(&vm->node, &ptdev->mmu->vm.list);
