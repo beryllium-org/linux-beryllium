@@ -22,7 +22,11 @@ bool panthor_is_sky1(struct panthor_device *ptdev)
 {
 	struct device *dev = ptdev->base.dev;
 
-	return acpi_dev_hid_uid_match(ACPI_COMPANION(dev), "CIXH5000", NULL);
+	/* DT devices have no ACPI companion; acpi_dev_hid_uid_match() does
+	 * not NULL-check its device argument.
+	 */
+	return has_acpi_companion(dev) &&
+	       acpi_dev_hid_uid_match(ACPI_COMPANION(dev), "CIXH5000", NULL);
 }
 
 /*
