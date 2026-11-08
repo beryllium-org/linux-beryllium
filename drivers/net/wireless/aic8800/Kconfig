@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-2.0
+
+config AIC8800_FDRV
+	tristate "AIC8800/AIC8801-series USB wireless support (D80/DC/DW)"
+	depends on USB && CFG80211
+	depends on m
+	select AIC8800_LOADFW
+	help
+	  Fullmac wireless support for the AICsemi AIC8800 family of
+	  USB wifi chips: AIC8800D80, AIC8800D80X2, AIC8800DC, AIC8800DW,
+	  AIC8800D81X2 and AIC8800D89X2, as well as BrosTrend, Tenda,
+	  Mercusys and TP-Link dongles built on them.
+
+	  Firmware is loaded via request_firmware() from
+	  /lib/firmware/aic8800D80 and /lib/firmware/aic8800DC
+	  (packaged separately as aic8800-firmware).
+
+	  Say M to build aic8800_fdrv as a module.
+
+# hidden: selected by AIC8800_FDRV so the loader's tristate always follows
+# the wlan driver. The pair is module-only: aic8800_fdrv and aic_load_fw
+# define identically named global symbols (md5, bus/usb glue, fw path, ...)
+# inherited from the vendor code and must never be linked into vmlinux
+# together. DC/DW chips do not need the loader; they get their firmware
+# from aic8800_fdrv directly.
+config AIC8800_LOADFW
+	tristate
+	depends on USB
