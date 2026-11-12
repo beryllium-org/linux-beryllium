@@ -529,6 +529,19 @@ static struct drm_panel *find_panel_by_fwnode(const struct fwnode_handle *fwnode
 	return ERR_PTR(-EPROBE_DEFER);
 }
 
+/*
+ * fwnode_drm_find_panel - look up and reference a panel by firmware node
+ *
+ * Same contract as of_drm_find_panel(): the panel's reference count is
+ * incremented before returning, and the caller must call drm_panel_put()
+ * when it no longer needs the panel pointer.
+ */
+struct drm_panel *fwnode_drm_find_panel(const struct fwnode_handle *fwnode)
+{
+	return find_panel_by_fwnode(fwnode);
+}
+EXPORT_SYMBOL(fwnode_drm_find_panel);
+
 /* Find panel by follower device */
 static struct drm_panel *find_panel_by_dev(struct device *follower_dev)
 {
