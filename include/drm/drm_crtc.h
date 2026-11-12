@@ -190,9 +190,10 @@ struct drm_crtc_state {
 
 	/**
 	 * @plane_mask: Bitmask of drm_plane_mask(plane) of planes attached to
-	 * this CRTC.
+	 * this CRTC.  Must be u64 for devices with more than 32 planes (display
+	 * clusters); a u32 truncates the high plane indices.
 	 */
-	u32 plane_mask;
+	u64 plane_mask;
 
 	/**
 	 * @connector_mask: Bitmask of drm_connector_mask(connector) of

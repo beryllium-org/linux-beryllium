@@ -1651,19 +1651,89 @@ acpi_graph_get_remote_endpoint(const struct fwnode_handle *__fwnode)
 		return args.nargs ? NULL : args.fwnode;
 
 	/*
-	 * Always require two arguments with the reference: port and
-	 * endpoint indices.
+	 * Two dialects exist beyond the upstream integer form:
+	 *  - upstream: Package { dev, port_nr, endpoint_nr } (nargs == 2),
+	 *    resolved below via the legacy "port"/"endpoint" properties
+	 *    with a "reg" fallback;
+	 *  - CIX Sky1: Package { dev, "node@N", ... } — one or more
+	 *    sub-node name strings (e.g. "pipeline@0", "port@0",
+	 *    "endpoint@0"), resolved by walking the device's child nodes
+	 *    by name, with a "reg" value fallback.  As with the upstream
+	 *    path, the returned node carries no extra reference.
 	 */
-	if (args.nargs != 2)
-		return NULL;
+	if (args.nargs != 2) {
+		const union acpi_object *pkg;
+		struct fwnode_handle *node = args.fwnode;
+		unsigned int i;
+
+		if (acpi_node_prop_get(__fwnode, "remote-endpoint",
+				       (void **)&pkg))
+			return NULL;
+
+		if (pkg->type != ACPI_TYPE_PACKAGE || pkg->package.count < 3)
+			return NULL;
+
+		for (i = 1; i < pkg->package.count; i++) {
+			const union acpi_object *el =
+				&pkg->package.elements[i];
+			struct fwnode_handle *child;
+			unsigned int idx;
+
+			if (el->type != ACPI_TYPE_STRING)
+				return NULL;
+
+			child = fwnode_get_named_child_node(
+				node, el->string.pointer);
+			if (!child) {
+				if (sscanf(el->string.pointer,
+					   "%*[^@]@%u", &idx) == 1)
+					child = acpi_graph_get_child_prop_value(
+						node, "reg", idx);
+			}
+			if (!child)
+				return NULL;
+
+			node = child;
+		}
+
+		return node;
+	}
 
 	fwnode = args.fwnode;
 	port_nr = args.args[0];
 	endpoint_nr = args.args[1];
 
-	fwnode = acpi_graph_get_child_prop_value(fwnode, "port", port_nr);
+	fwnode = acpi_graph_get_child_prop_value(args.fwnode, "port", port_nr);
+	if (!fwnode)
+		fwnode = acpi_graph_get_child_prop_value(args.fwnode, "reg",
+							 port_nr);
+	if (!fwnode)
+		return NULL;
 
-	return acpi_graph_get_child_prop_value(fwnode, "endpoint", endpoint_nr);
+	/* Ports/endpoints may carry their index in "reg" instead of the
+	 * legacy "port"/"endpoint" properties (CIX Sky1 firmware). */
+	{
+		struct fwnode_handle *ep;
+
+		ep = acpi_graph_get_child_prop_value(fwnode, "endpoint",
+						     endpoint_nr);
+		if (!ep)
+			ep = acpi_graph_get_child_prop_value(fwnode, "reg",
+							     endpoint_nr);
+		if (!ep) {
+			/* Some firmware (CIX Sky1) numbers endpoint "reg"
+			 * properties per-port (always 0), so fall back to
+			 * matching the child by its endpoint@N name. */
+			char name[16];
+
+			snprintf(name, sizeof(name), "endpoint@%u",
+				 endpoint_nr);
+			ep = fwnode_get_named_child_node(fwnode, name);
+			if (ep)
+				fwnode_handle_put(ep);
+		}
+		return ep;
+	}
 }
 
 static bool acpi_fwnode_device_is_available(const struct fwnode_handle *fwnode)
