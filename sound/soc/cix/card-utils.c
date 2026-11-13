@@ -12,8 +12,6 @@
 #define SKY1_AUDSS_CRU_INFO_MCLK		0x70
 #define SKY1_AUDSS_CRU_INFO_MCLK_DIV_OFF(x)	(10 + (3 * (x)))
 #define SKY1_AUDSS_CRU_INFO_MCLK_DIV_MASK(x)	GENMASK((12 + (3 * (x))), (10 + (3 * (x))))
-
-#define SKY1_AUDSS_DP_AUDIO_COUNT		5
 #define SKY1_AUDSS_DP_AUDIO_OFFSET		5
 
 static const char *mclk_pll_names[AUDIO_CLK_NUM] = {
@@ -939,11 +937,8 @@ int cix_card_parse_acpi(struct cix_asoc_card *priv)
 		return PTR_ERR(priv->cru_regmap);
 	}
 
-	for (i = 0; i < (LK_MAX - SKY1_AUDSS_DP_AUDIO_COUNT); i++)
+	for (i = 0; i < LK_I2S5_DP0; i++)
 		if (!cix_acpi_i2s_audio_check_present(sky1_dailink[i].id))
-			num_links++;
-	for (i = 0; i < SKY1_AUDSS_DP_AUDIO_COUNT; i++)
-		if (!cix_acpi_dp_audio_check_present(i))
 			num_links++;
 	if (num_links <= 0)
 		return -ENODEV;
@@ -968,7 +963,7 @@ int cix_card_parse_acpi(struct cix_asoc_card *priv)
 	priv->link_info = link_info;
 
 	/* on-board audio */
-	for (i = 0; i < (LK_MAX - SKY1_AUDSS_DP_AUDIO_COUNT); i++) {
+	for (i = 0; i < LK_I2S5_DP0; i++) {
 		if (cix_acpi_i2s_audio_check_present(sky1_dailink[i].id))
 			continue;
 
@@ -1007,58 +1002,112 @@ int cix_card_parse_acpi(struct cix_asoc_card *priv)
 		link_info++;
 	}
 
-	/* dp audio */
-	for (i = 0; i < SKY1_AUDSS_DP_AUDIO_COUNT; i++) {
-		char dp_str[32];
-
-		if (cix_acpi_dp_audio_check_present(i))
-			continue;
-
-		memcpy(link, &sky1_dailink[i + LK_I2S5_DP0], sizeof(struct snd_soc_dai_link));
-		memcpy(link_info, &sky1_link_info[i + LK_I2S5_DP0], sizeof(struct dai_link_info));
-
-		link->num_cpus = 1;
-		link->num_codecs = 1;
-		link->num_platforms = 1;
-
-		link->cpus->name = cix_acpi_dp_audio_get_cpu_name(i);
-		link->codecs->name = cix_acpi_dp_audio_get_codec_name(dev, i);
-		link->cpus->dai_name = "i2s-mc-aif1";
-		link->codecs->dai_name = "i2s-hifi";
-		link->platforms->name = link->cpus->name;
-
-		link->trigger_start = SND_SOC_TRIGGER_ORDER_DEFAULT;
-		link->trigger_stop = SND_SOC_TRIGGER_ORDER_LDC;
-
-		snprintf(dp_str, sizeof(dp_str), "HDMI/DP,pcm=%d", (int)(link - card->dai_link));
-		link_info->jack_pin[JACK_DPOUT].pin = devm_kstrdup(dev, dp_str, GFP_KERNEL);
-		if (!link_info->jack_pin[JACK_DPOUT].pin) {
-			ret = -ENOMEM;
-			goto err;
-		}
-		link_info->jack_pin[JACK_DPOUT].mask = SND_JACK_LINEOUT;
-		link_info->jack_det_mask |= JACK_MASK_DPOUT;
-
-		dev_info(dev, "dp[%d]:cpu[%s][%s] codec[%s][%s] platform[%s]\n", i,
-			 link->cpus->name, link->cpus->dai_name,
-			 link->codecs->name, link->codecs->dai_name,
-			 link->platforms->name);
-
-		if (!link->cpus->name || !link->cpus->dai_name ||
-		    !link->codecs->name || !link->codecs->dai_name ||
-		    !link->platforms->name) {
-			ret =  -EPROBE_DEFER;
-			goto err;
-		}
-
-		link++;
-		link_info++;
-	}
-
-err:
-	return ret;
+	return 0;
 }
 EXPORT_SYMBOL(cix_card_parse_acpi);
+
+/*
+ * Build a one-link sound card for a single DP audio port.
+ *
+ * One ALSA card per DP port instead of one card with one PCM per port:
+ * generic userspace (PipeWire/ACP) only auto-generates per-PCM profiles
+ * for HDA cards; a multi-PCM ASoC card collapses to a single sink bound
+ * to PCM 0, which may be a disconnected port (playback into it stalls,
+ * since the I2S runs as clock slave with no trained link behind it).
+ * A card per port is the same topology mainline ASoC HDMI drivers use
+ * (e.g. vc4-hdmi) and needs no userspace profile tables.
+ */
+int cix_card_parse_acpi_dp(struct cix_asoc_card *priv, unsigned int dp_idx)
+{
+	struct snd_soc_card *card = priv->card;
+	struct snd_soc_dai_link *link;
+	struct dai_link_info *link_info;
+	struct device *dev = card->dev;
+
+	if (dp_idx >= SKY1_CARD_DP_LINK_COUNT ||
+	    cix_acpi_dp_audio_check_present(dp_idx))
+		return -ENODEV;
+
+	link = devm_kzalloc(dev, sizeof(*link), GFP_KERNEL);
+	if (!link)
+		return -ENOMEM;
+
+	link_info = devm_kzalloc(dev, sizeof(*link_info), GFP_KERNEL);
+	if (!link_info)
+		return -ENOMEM;
+
+	memcpy(link, &sky1_dailink[LK_I2S5_DP0 + dp_idx], sizeof(*link));
+	memcpy(link_info, &sky1_link_info[LK_I2S5_DP0 + dp_idx],
+	       sizeof(*link_info));
+
+	link->num_cpus = 1;
+	link->num_codecs = 1;
+	link->num_platforms = 1;
+
+	link->cpus->name = cix_acpi_dp_audio_get_cpu_name(dp_idx);
+	link->codecs->name = cix_acpi_dp_audio_get_codec_name(dev, dp_idx);
+	link->cpus->dai_name = "i2s-mc-aif1";
+	link->codecs->dai_name = "i2s-hifi";
+	link->platforms->name = link->cpus->name;
+
+	link->trigger_start = SND_SOC_TRIGGER_ORDER_DEFAULT;
+	link->trigger_stop = SND_SOC_TRIGGER_ORDER_LDC;
+
+	/*
+	 * Single-link card: name the jack "Line Out" so ACP's stock
+	 * analog-output-lineout path (Jack "Line Out", required-any) binds
+	 * to it and reports plug state as port availability. The default
+	 * session-manager policy then avoids routing audio to a card whose
+	 * monitor is disconnected. SND_JACK_LINEOUT matches the semantic.
+	 */
+	link_info->jack_pin[JACK_DPOUT].pin = devm_kstrdup(dev, "Line Out",
+							   GFP_KERNEL);
+	if (!link_info->jack_pin[JACK_DPOUT].pin)
+		return -ENOMEM;
+	link_info->jack_pin[JACK_DPOUT].mask = SND_JACK_LINEOUT;
+	link_info->jack_det_mask |= JACK_MASK_DPOUT;
+
+	if (!link->cpus->name || !link->cpus->dai_name ||
+	    !link->codecs->name || !link->codecs->dai_name ||
+	    !link->platforms->name)
+		return -EPROBE_DEFER;
+
+	card->name = devm_kasprintf(dev, GFP_KERNEL, "sky1-dp%u", dp_idx);
+	if (!card->name)
+		return -ENOMEM;
+	card->num_links = 1;
+	card->dai_link = link;
+	card->suspend_post = cix_card_suspend_post;
+	card->resume_pre = cix_card_resume_pre;
+	priv->link_info = link_info;
+
+	dev_info(dev, "dp%u: cpu[%s][%s] codec[%s][%s] platform[%s]\n",
+		 dp_idx, link->cpus->name, link->cpus->dai_name,
+		 link->codecs->name, link->codecs->dai_name,
+		 link->platforms->name);
+
+	return 0;
+}
+EXPORT_SYMBOL(cix_card_parse_acpi_dp);
+
+/* Presence probes for the machine driver's per-link child devices. */
+bool cix_card_acpi_i2s_link_present(unsigned int link_idx)
+{
+	if (link_idx >= LK_I2S5_DP0)
+		return false;
+
+	return cix_acpi_i2s_audio_check_present(sky1_dailink[link_idx].id) == 0;
+}
+EXPORT_SYMBOL(cix_card_acpi_i2s_link_present);
+
+bool cix_card_acpi_dp_link_present(unsigned int dp_idx)
+{
+	if (dp_idx >= SKY1_CARD_DP_LINK_COUNT)
+		return false;
+
+	return cix_acpi_dp_audio_check_present(dp_idx) == 0;
+}
+EXPORT_SYMBOL(cix_card_acpi_dp_link_present);
 
 MODULE_DESCRIPTION("Sound Card Utils for Cix Technology");
 MODULE_AUTHOR("Xing.Wang <xing.wang@cixtech.com>");

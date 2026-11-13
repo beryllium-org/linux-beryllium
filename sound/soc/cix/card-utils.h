@@ -40,6 +40,13 @@ enum {
 	LK_MAX
 };
 
+/*
+ * On-board links are the entries below LK_I2S5_DP0; the ACPI-enumerated
+ * DP audio links (\_SB.DP0x) are the rest. Runtime bounds checks live in
+ * cix_card_acpi_i2s_link_present()/cix_card_acpi_dp_link_present().
+ */
+#define SKY1_CARD_DP_LINK_COUNT		(LK_MAX - LK_I2S5_DP0)
+
 struct dai_link_info {
 	struct clk *clk_mclk;
 	struct clk *clks[AUDIO_CLK_NUM];
@@ -73,4 +80,7 @@ struct cix_asoc_card {
 
 int cix_card_parse_of(struct cix_asoc_card *priv);
 int cix_card_parse_acpi(struct cix_asoc_card *priv);
+int cix_card_parse_acpi_dp(struct cix_asoc_card *priv, unsigned int dp_idx);
+bool cix_card_acpi_i2s_link_present(unsigned int link_idx);
+bool cix_card_acpi_dp_link_present(unsigned int dp_idx);
 #endif
