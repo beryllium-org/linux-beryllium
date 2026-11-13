@@ -637,18 +637,6 @@ err_put_np:
 }
 EXPORT_SYMBOL(cix_card_parse_of);
 
-enum {
-	LK_I2S0_SC_ALC5682_CODEC = 0,
-	LK_I2S3_MC_ALC1019_PA,
-	LK_I2S5_DP0,
-	LK_I2S6_DP1,
-	LK_I2S7_DP2,
-	LK_I2S8_DP3,
-	LK_I2S9_DP4,
-
-	LK_MAX
-};
-
 /*
  * COMP_CPU with "dai_name" only, works well in DT binding, cause
  * component will be matched by "of_node".
