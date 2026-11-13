@@ -2,6 +2,7 @@
 /* Copyright 2024 Cix Technology Group Co., Ltd. */
 #include <linux/kernel.h>
 #include <linux/version.h>
+#include <drm/drm_eld.h>
 #include "trilin_dptx_reg.h"
 #include "trilin_dptx.h"
 
@@ -175,10 +176,37 @@ void dptx_audio_reconfig_and_enable(void *data)
 	trilin_dp_write(dp, TRILIN_DPTX_SEC0_AUDIO_ENABLE, 1);
 }
 
+static int dptx_audio_get_eld(struct device *dev, void *data,
+			      uint8_t *buf, size_t len)
+{
+	struct trilin_dp *dp = data;
+	struct drm_connector *connector = &dp->connector.base;
+	size_t size;
+
+	/*
+	 * The DRM core rebuilds connector->eld from the EDID on every
+	 * detection pass (drm_get_edid() -> drm_connector_update_edid_property()),
+	 * so there is nothing to assemble here: just hand out a snapshot.
+	 * When nothing is connected the ELD is zeroed, so its version field
+	 * reads 0 and hdmi-codec reports no sink connected (-ENOTCONN).
+	 */
+	mutex_lock(&connector->eld_mutex);
+	size = min_t(size_t, drm_eld_size(connector->eld), len);
+	memcpy(buf, connector->eld, size);
+	mutex_unlock(&connector->eld_mutex);
+
+	/*
+	 * hdmi-codec treats any nonzero return as an error, so report
+	 * success as 0 and let the empty-ELD case flow through it.
+	 */
+	return 0;
+}
+
 const struct hdmi_codec_ops dptx_audio_codec_ops = {
 	.hw_params = dptx_audio_hw_params,
 	.audio_startup = dptx_audio_startup,
 	.audio_shutdown = dptx_audio_shutdown,
 	.get_dai_id = dptx_audio_get_dai_id,
+	.get_eld = dptx_audio_get_eld,
 	.hook_plugged_cb = dptx_audio_hook_plugged_cb
 };
