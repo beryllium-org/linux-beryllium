@@ -1957,10 +1957,21 @@ end:
 	trilin_dp_write(dp, TRILIN_DPTX_SECONDARY_STREAM_ENABLE + regs_off, 1);
 
 	/* re-config for dptx audio after dp resume back or plugin back if need */
-	if (dp_audio->running) {
-		DP_INFO("Re-config and enable dptx audio\n");
-		dptx_audio_reconfig_and_enable(dp);
+	if (!dp_audio->params.sample_rate) {
+		/*
+		 * First stream on this link: bring the audio block up with
+		 * default parameters even though no PCM is open yet.
+		 * Enabling audio only at the first PCM open made the sink
+		 * lock onto the audio stream during the first playback
+		 * after boot, which dropped that playback's first ~2s;
+		 * doing it here pays the sink's audio-lock cost during
+		 * boot instead.
+		 */
+		dp_audio->params.sample_rate = 48000;
+		dp_audio->params.sample_width = 16;
+		dp_audio->params.channels = 2;
 	}
+	dptx_audio_reconfig_and_enable(dp);
 
 	dp->active_panels[dp_panel->source_id] = dp_panel;
 	dp->active_stream_cnt++;
