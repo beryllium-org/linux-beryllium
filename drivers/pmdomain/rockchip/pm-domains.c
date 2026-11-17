@@ -921,6 +921,18 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
 	pd->genpd.flags = GENPD_FLAG_PM_CLK | GENPD_FLAG_NO_STAY_ON;
 	if (pd_info->active_wakeup)
 		pd->genpd.flags |= GENPD_FLAG_ACTIVE_WAKEUP;
+
+	/*
+	 * The RK3588 GPU domain cannot be safely re-de-idled after being
+	 * powered off as "unused": the Q-channel of the Mali IP stays
+	 * gated and the first register read of the re-probing driver
+	 * takes an external abort. Keep it on; the consumer still gates
+	 * its clocks on runtime suspend.
+	 */
+	if (of_device_is_compatible(pmu->dev->of_node, "rockchip,rk3588-pmu") &&
+	    pd->info->name && !strcmp(pd->info->name, "gpu"))
+		pd->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
+
 	pm_genpd_init(&pd->genpd, NULL,
 		      !rockchip_pmu_domain_is_on(pd) ||
 		      (pd->info->mem_status_mask && !rockchip_pmu_domain_is_mem_on(pd)));
